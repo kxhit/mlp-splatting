@@ -19,6 +19,8 @@ class PrimitiveMLP(nn.Module):
         self.net = nn.Sequential(
             nn.Linear(input_dim * num_frequencies * 2, hidden_dim),
             nn.ReLU(),
+            # nn.Linear(hidden_dim, hidden_dim),
+            # nn.ReLU(),
             nn.Linear(hidden_dim, 4)  # RGB + density
         )
 
@@ -34,7 +36,7 @@ class PrimitiveMLP(nn.Module):
         return torch.cat([rgb, sigma], dim=-1)
 
 class NeuralPrimitiveScene(nn.Module):
-    def __init__(self, num_primitives=128, hidden_dim=64, pe_frequencies=6):
+    def __init__(self, num_primitives=128, hidden_dim=16, pe_frequencies=10):
         super().__init__()
         self.num_primitives = num_primitives
         bound = 1.0
@@ -42,7 +44,7 @@ class NeuralPrimitiveScene(nn.Module):
         self.positions = nn.Parameter(
             torch.rand(num_primitives, 3) * 2 * bound - bound
         )
-        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.5)  # Learnable per-primitive scale
+        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.9)  # Learnable per-primitive scale
 
         self.mlps = nn.ModuleList([
             PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
@@ -52,7 +54,10 @@ class NeuralPrimitiveScene(nn.Module):
         self.register_buffer("alpha_accum", torch.zeros(num_primitives))
         self.register_buffer("occupancy_accum", torch.zeros(num_primitives))
 
+        self.invalid_nums = 0
+
     def forward(self, ray_o, ray_d):
+        self.invalid_nums = 0
         B = ray_o.shape[0]
         N = self.num_primitives
 
@@ -77,13 +82,17 @@ class NeuralPrimitiveScene(nn.Module):
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
             mask = norm <= self.scales[i]  # (B, 1)
             if not mask.any():
+                # If no points are within the scale, return zero RGB and sigma
+                print(f"Primitive {i} has no points within scale, returning zeros.")
+                self.invalid_nums += 1
                 rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
                 sigma_list.append(torch.zeros(B, 1, device=ray_o.device))
+                # TODO log the alpha for pruning
                 continue
 
             out = self.mlps[i](ray_d, dist)
-            # decay = torch.exp(-norm ** 2 / (2 * self.scales[i] ** 2))  # (B, 1)
-            sigma = out[:, 3:] #* decay  # soft bound
+            decay = torch.exp(-norm ** 2 / (2 * self.scales[i] ** 2))  # (B, 1)
+            sigma = out[:, 3:] * decay  # soft bound
             rgb = out[:, :3]
 
             sigma = sigma * mask.float()  # hard bound enforcement
@@ -96,8 +105,9 @@ class NeuralPrimitiveScene(nn.Module):
                 alpha = 1.0 - torch.exp(-sigma)
                 alpha_sum = (alpha.squeeze(-1) * mask.float().squeeze(-1)).sum()
                 occ = mask.float().sum()
-                self.alpha_accum[i] += alpha_sum.detach()
-                self.occupancy_accum[i] += occ.detach()
+                decay = 0.9
+                self.alpha_accum[i] = (1 - decay) * self.alpha_accum[i] + decay * alpha_sum.detach()
+                self.occupancy_accum[i] = (1 - decay) * self.occupancy_accum[i] + decay * occ.detach()
 
         rgb = torch.stack(rgb_list, dim=0)
         sigma = torch.stack(sigma_list, dim=0)

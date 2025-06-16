@@ -41,9 +41,11 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         print(f"[Epoch {epoch+1}] Loss: {loss.item():.6f}")
 
         # Prune & densify primitives
-        if epoch % 25 == 0 and epoch > 50:
+        if epoch % 25 == 0 and epoch > 500:
             prune_primitives(scene)
-            densify_primitives(scene, num_new=16)
+            MAX_NUM_PRIMITIVES = 150
+            if scene.num_primitives < MAX_NUM_PRIMITIVES:
+                densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
         # Eval after each epoch (first image only)
@@ -70,23 +72,34 @@ def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01):
     scene.alpha_accum = scene.alpha_accum[keep_indices]
     scene.occupancy_accum = scene.occupancy_accum[keep_indices]
 
-def densify_primitives(scene, num_new=32, noise_scale=0.01):
-    topk = min(num_new, scene.num_primitives)
-    top_indices = torch.randperm(scene.num_primitives)[:topk]
+def densify_primitives(scene, num_new=32, noise_scale=0.01, alpha_thresh=0.05):
+    # 筛选出 alpha 大于阈值的 primitive
+    candidate_mask = scene.alpha_accum > alpha_thresh
+    candidate_indices = torch.nonzero(candidate_mask).squeeze(-1)
 
-    new_positions = scene.positions[top_indices] + noise_scale * torch.randn_like(scene.positions[top_indices])
-    new_scales = scene.scales[top_indices].clone()
-    new_mlps = [copy.deepcopy(scene.mlps[i]) for i in top_indices]
+    if candidate_indices.numel() == 0:
+        print("No suitable primitives found for densification.")
+        return
+
+    # 从中选择最多 num_new 个进行 densify（可随机，也可 topk）
+    if candidate_indices.numel() > num_new:
+        selected = candidate_indices[torch.randperm(candidate_indices.numel())[:num_new]]
+    else:
+        selected = candidate_indices
+
+    new_positions = scene.positions[selected] + noise_scale * torch.randn_like(scene.positions[selected])
+    new_scales = scene.scales[selected].clone()
+    new_mlps = [copy.deepcopy(scene.mlps[i]) for i in selected]
 
     scene.positions = nn.Parameter(torch.cat([scene.positions, new_positions], dim=0))
     scene.scales = nn.Parameter(torch.cat([scene.scales, new_scales], dim=0))
     scene.mlps.extend(new_mlps)
     scene.num_primitives += len(new_mlps)
 
-    # ✅ 扩展统计 buffer
+    # 扩展统计 buffer
     device = scene.alpha_accum.device
     zeros = torch.zeros(len(new_mlps), device=device)
     scene.alpha_accum = torch.cat([scene.alpha_accum, zeros], dim=0)
     scene.occupancy_accum = torch.cat([scene.occupancy_accum, zeros], dim=0)
 
-    print(f"Densify: {len(new_mlps)} new primitives added.")
+    print(f"Densify: {len(new_mlps)} new primitives added (alpha_thresh={alpha_thresh}).")
