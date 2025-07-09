@@ -1,7 +1,9 @@
+import os
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import StepLR
 from model import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
 from llff_loader import LLFFDataset
@@ -9,15 +11,107 @@ from tqdm import tqdm
 from save_model import save_model
 from visualize import evaluate_and_visualize
 
+
 import copy
+from utils.loss_utils import ssim
+
+
+def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
+    """
+    Enforces that each primitive produces consistent outputs for neighboring rays.
+    This encourages local smoothness and reduces high-frequency artifacts.
+    """
+    B = ray_o.shape[0]
+    N = model.num_primitives
+
+    ray_d = F.normalize(ray_d, dim=-1)
+    noise = torch.randn_like(ray_o) * eps
+    ray_o_perturbed = ray_o + noise
+
+    ray_o_expand = ray_o.unsqueeze(0).expand(N, B, 3)
+    ray_o_perturbed_expand = ray_o_perturbed.unsqueeze(0).expand(N, B, 3)
+    ray_d_expand = ray_d.unsqueeze(0).expand(N, B, 3)
+    center_expand = model.positions[:, None, :].expand(N, B, 3)
+
+    # 原始投影距离
+    vec = center_expand - ray_o_expand
+    t = torch.sum(vec * ray_d_expand, dim=-1, keepdim=True)
+    proj = ray_o_expand + t * ray_d_expand
+    dist = center_expand - proj  # (N, B, 3)
+
+    # 偏移后的投影距离
+    vec2 = center_expand - ray_o_perturbed_expand
+    t2 = torch.sum(vec2 * ray_d_expand, dim=-1, keepdim=True)
+    proj2 = ray_o_perturbed_expand + t2 * ray_d_expand
+    dist2 = center_expand - proj2  # (N, B, 3)
+
+    loss_total = 0.0
+    count = 0
+
+    for i in range(N):
+        norm = torch.norm(dist[i], dim=-1, keepdim=True)
+        mask = norm <= 5 * model.scales[i]  # (B, 1)
+
+        if not mask.any():
+            continue
+
+        out1 = model.mlps[i](ray_d, dist[i])  # (B, 4)
+        out2 = model.mlps[i](ray_d, dist2[i])  # (B, 4)
+
+        rgb1 = out1[..., :3]
+        rgb2 = out2[..., :3]
+
+        diff = F.mse_loss(rgb1[mask.squeeze(-1)], rgb2[mask.squeeze(-1)])
+        loss_total += diff
+        count += 1
+
+    if count == 0:
+        return torch.tensor(0.0, device=ray_o.device)
+    else:
+        return loss_total / count
+    """            
+    if epoch%10 == 0:
+                # 新增相邻 ray consistency loss
+                loss_smooth = primitive_consistency_loss(scene, rays_o_batch, rays_d_batch, eps=1e-3)
+                # 总 loss（你可以调节权重）
+                loss += 0.01 * loss_smooth
+    """
+
+
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda'):
     dataset = LLFFDataset(data_dir)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    scene = NeuralPrimitiveScene().to(device)
-    optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
+    scene = NeuralPrimitiveScene(num_primitives=512, initial_positions=dataset.positions).to(device)
+    #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
+    optimizer = torch.optim.Adam([
+            {"params": scene.mlps.parameters()},  # 默认 1e-3
+            {"params": scene.scales, "lr":1e-1},             # 默认 1e-3
+            {"params": scene.positions, "lr": 1e-2},  # 提高 10 倍学习率
+        ], lr=1e-3)
+
+    #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
+
+
+    ckpt_path = f"scene_epoch_0.pt"
+    torch.save(scene.state_dict(), ckpt_path)
+    print(f"[Checkpoint] Saved model to {ckpt_path}")
+
+
+
+    """
+    #加载check point继续训练
+    ckpt = torch.load("scene_ckpt_tmp.pt")
+    model_dict = scene.state_dict()
+    ckpt_dict = {k: v for k, v in ckpt.items() if k in model_dict and model_dict[k].shape == v.shape}
+    model_dict.update(ckpt_dict)
+    scene.load_state_dict(model_dict)
+    print(f"[Checkpoint] Partially loaded model from scene_ckpt_tmp.pt (matched {len(ckpt_dict)} tensors)")
+    """
+
+        
     for epoch in tqdm(range(num_epochs)):
         for rays_o, rays_d, rgbs in dataloader:
             # rays_o, rays_d, rgbs: [B, H*W, 3]
@@ -32,18 +126,24 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             rgbs_batch = rgbs[rand_idx]
 
             pred = scene(rays_o_batch, rays_d_batch)
-            loss = F.mse_loss(pred, rgbs_batch)
-
+            loss = F.mse_loss(pred, rgbs_batch) 
             optimizer.zero_grad()
             loss.backward()
+
+            #print("Position grad norm:", scene.positions.grad.norm().item())
+            #with torch.no_grad():
+                #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
+
             optimizer.step()
 
         print(f"[Epoch {epoch+1}] Loss: {loss.item():.6f}")
 
+        #scheduler.step()
+
         # Prune & densify primitives
         if epoch % 25 == 0 and epoch > 500:
             prune_primitives(scene)
-            MAX_NUM_PRIMITIVES = 150
+            MAX_NUM_PRIMITIVES = 512
             if scene.num_primitives < MAX_NUM_PRIMITIVES:
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
@@ -52,6 +152,13 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         if (epoch + 1) % 50 == 0 or epoch == num_epochs - 1:
             torch.save(scene.state_dict(), "scene_ckpt_tmp.pt")
             evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
+
+
+        # Save at epoch 100, 1000, and final
+        if (epoch + 1 == 100) or (epoch + 1 == 1000):
+            ckpt_path = f"scene_epoch_{epoch+1:05d}.pt"
+            torch.save(scene.state_dict(), ckpt_path)
+            print(f"[Checkpoint] Saved model to {ckpt_path}")
 
     save_model(scene, "scene_ckpt.pt")
 

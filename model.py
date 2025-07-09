@@ -35,16 +35,30 @@ class PrimitiveMLP(nn.Module):
         # sigma = (sigma > 0.5).float()  # Binary sigma
         return torch.cat([rgb, sigma], dim=-1)
 
+
 class NeuralPrimitiveScene(nn.Module):
-    def __init__(self, num_primitives=128, hidden_dim=16, pe_frequencies=10):
+    def __init__(self, num_primitives=1024, hidden_dim=16, pe_frequencies=10, initial_positions=None):
         super().__init__()
         self.num_primitives = num_primitives
-        bound = 1.0
-        # self.positions = nn.Parameter(torch.randn(num_primitives, 3))
-        self.positions = nn.Parameter(
-            torch.rand(num_primitives, 3) * 2 * bound - bound
-        )
-        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.9)  # Learnable per-primitive scale
+
+
+        if initial_positions == None:
+            bound = 1.0
+            # self.positions = nn.Parameter(torch.randn(num_primitives, 3))
+            self.positions = nn.Parameter(
+                torch.rand(num_primitives, 3) * 2 * bound - bound
+            )
+        else:
+            # 从 initial_positions 中随机采样 num_primitives 个点
+            assert initial_positions.shape[1] == 3, "initial_positions should be of shape (N, 3)"
+            N = initial_positions.shape[0]
+            assert N >= self.num_primitives, f"initial_positions must have at least {self.num_primitives} points"
+
+            indices = torch.randperm(N)[:self.num_primitives]
+            sampled_positions = initial_positions[indices]
+            self.positions = nn.Parameter(sampled_positions.clone().detach())  # make it a learnable parameter
+
+        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 1)  # Learnable per-primitive scale
 
         self.mlps = nn.ModuleList([
             PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
@@ -80,23 +94,29 @@ class NeuralPrimitiveScene(nn.Module):
         for i in range(N):
             dist = vec_perp[i]  # (B, 3)
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
+
             mask = norm <= self.scales[i]  # (B, 1)
+            """
             if not mask.any():
                 # If no points are within the scale, return zero RGB and sigma
-                print(f"Primitive {i} has no points within scale, returning zeros.")
+                # print(f"Primitive {i} has no points within scale, returning zeros.")
                 self.invalid_nums += 1
                 rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
                 sigma_list.append(torch.zeros(B, 1, device=ray_o.device))
                 # TODO log the alpha for pruning
                 continue
+            """
 
             out = self.mlps[i](ray_d, dist)
+
+            # TODO 
             decay = torch.exp(-norm ** 2 / (2 * self.scales[i] ** 2))  # (B, 1)
+
             sigma = out[:, 3:] * decay  # soft bound
             rgb = out[:, :3]
 
-            sigma = sigma * mask.float()  # hard bound enforcement
-            rgb = rgb * mask.float()
+            #sigma = sigma * mask.float()  # hard bound enforcement
+            #rgb = rgb * mask.float()
 
             rgb_list.append(rgb)
             sigma_list.append(sigma)

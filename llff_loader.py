@@ -4,6 +4,7 @@ import os
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+from utils.read_write_model import read_images_binary, read_cameras_binary, read_points3D_binary, qvec2rotmat
 
 # class LLFFDataset(Dataset):
 #     def __init__(self, basedir, factor=8):
@@ -54,22 +55,66 @@ class LLFFDataset(Dataset):
         self._load_meta(factor)
 
     def _load_meta(self, factor):
-        poses_bounds = np.load(os.path.join(self.basedir, "poses_bounds.npy"))
-        poses = poses_bounds[:, :-2].reshape([-1, 3, 5])
-        self.poses = poses[:, :, :4]
+        # === 修改部分：从 COLMAP 读取 pose ===
+        colmap_dir = os.path.join(self.basedir, "sparse/0")
+        images = read_images_binary(os.path.join(colmap_dir, "images.bin"))
+        cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
-        # 添加位姿归一化
-        positions = self.poses[:, :, 3]
+        image_ids_sorted = sorted(images.keys())
+        poses = []
+        hwf_list = []
+        for image_id in image_ids_sorted:
+            image = images[image_id]
+            cam = cameras[image.camera_id]
+
+            # pose: w2c → c2w
+            R = qvec2rotmat(image.qvec)
+            t = image.tvec.reshape(3,)
+            c2w = np.eye(4)
+            c2w[:3, :3] = R.T
+            c2w[:3, 3] = -R.T @ t
+            poses.append(c2w[:3, :4])
+
+            # intrinsic: assume fx = fy
+            H, W = cam.height, cam.width
+            fx = cam.params[0]
+            hwf_list.append([H, W, fx])
+
+        poses = np.stack(poses, axis=0)         # (N, 3, 4)
+        hwf = np.array(hwf_list)                # (N, 3)
+
+        # === 归一化位姿（保持原逻辑）===
+        positions = poses[:, :, 3]
         avg_position = np.mean(positions, axis=0)
         dists = np.linalg.norm(positions - avg_position, axis=1)
         scale = 1.0 / (np.max(dists) * 0.75)  # 0.75是典型缩放因子
 
-        # 应用归一化
-        self.poses[:, :, 3] -= avg_position
-        self.poses[:, :, 3] *= scale
+        poses[:, :, 3] -= avg_position
+        poses[:, :, 3] *= scale
 
-        self.poses = torch.from_numpy(self.poses).float()
+        self.poses = torch.from_numpy(poses).float()
 
+
+        # === 加载并归一化 COLMAP 点云 ===
+        points3D = read_points3D_binary(os.path.join(colmap_dir, "points3D.bin"))
+        all_xyz = []
+
+        for pid in sorted(points3D.keys()):
+            xyz = points3D[pid].xyz
+            all_xyz.append(xyz)
+
+        all_xyz = np.stack(all_xyz, axis=0)  # shape: (M, 3)
+
+        # === 同样归一化（平移 + 缩放）===
+        all_xyz -= avg_position
+        all_xyz *= scale
+
+        self.positions = torch.from_numpy(all_xyz).float()  # shape: (M, 3)
+
+
+        # === 原封不动保留其余部分 ===
+
+        # 读取图片
         image_dir = os.path.join(self.basedir, f"images_{factor}")
         self.image_paths = sorted([
             os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('JPG', 'jpg', 'png'))
@@ -81,13 +126,15 @@ class LLFFDataset(Dataset):
         self.scale = scale
         self.avg_position = avg_position
 
-        # 计算焦距 (从poses_bounds获取)
-        hwf = poses[0, :, 4]
-        self.focal = hwf[2] / factor  # 根据下采样因子调整焦距
+        # 计算焦距（从 hwf 获取）
+        self.focal = hwf[0, 2] / factor  # 根据下采样因子调整焦距
 
-        # self.poses = self.poses[:1]
-        # self.images = self.images[:1]
+
+        # 只加载一张调试用
+        self.poses = self.poses[:1]
+        self.images = self.images[:1]
         print(f"Loaded {len(self.images)} images from {image_dir}")
+
 
     def __len__(self):
         return len(self.images)
@@ -102,13 +149,14 @@ class LLFFDataset(Dataset):
         H, W = img_hw
         i, j = torch.meshgrid(torch.arange(W), torch.arange(H), indexing="xy")
 
-        # 使用存储的焦距而不是硬编码值
         dirs = torch.stack([
-            (i - W * 0.5) / self.focal,  # 使用实际焦距
-            -(j - H * 0.5) / self.focal,  # 使用实际焦距
-            -torch.ones_like(i)
-        ], -1)
+            (i - W * 0.5) / self.focal,
+            (j - H * 0.5) / self.focal,
+            torch.ones_like(i)  # 🔁 z 是正方向
+        ], -1)  # shape: (H, W, 3)
 
+        # Rotate ray directions from camera to world
         rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], -1)
         rays_o = c2w[:3, 3].expand(rays_d.shape)
+
         return rays_o, rays_d
