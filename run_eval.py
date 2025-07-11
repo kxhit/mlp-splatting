@@ -1,25 +1,27 @@
 from visualize import evaluate_and_visualize
 import torch
 
+ 
+
 if __name__ == "__main__":
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern" # change to your scene path
 
     data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"  # change to your scene path
 
 
-    model_ckpt_path = "/home/yuzhou/Desktop/output/scene_ckpt_tmp.pt"           # saved model path
+    model_ckpt_path = "/home/yuzhou/Desktop/mlp-splatting/scene_ckpt_tmp.pt"           # saved model path
 
     
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
-    mlp_idx = list(range(4, 5))
+    mlp_idx = list(range(0, 1))
     mlp_idx = None
-    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=512)
+    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
 
 
 
 
-"""    
-# ---------------- 下面画图，是为了画视锥还有mlp的位置，mlp的位置应该在视锥向前延伸范围内 ----------------------
+"""
+# ---------------- 下面画图，是为了看视锥还有mlp的位置，mlp的位置应该在视锥向前延伸范围内 ----------------------
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -52,11 +54,12 @@ def get_all_rays(data_dir):
     return rays_o, rays_d
 
 if __name__ == "__main__":
-    data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"
-    ckpt = "/home/yuzhou/Desktop/output/scene_epoch_01000.pt"
+    data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"  # change to your scene path
+
+    ckpt = "/home/yuzhou/Desktop/mlp-splatting/scene_ckpt_tmp.pt"           # saved model path
     #ckpt = "/home/yuzhou/Desktop/output/scene_epoch_0.pt"
 
-    N = 512
+    N = 1024
 
     positions = load_positions(ckpt, N)
     rays_o, rays_d = get_all_rays(data_dir)

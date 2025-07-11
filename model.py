@@ -2,25 +2,46 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class IntegratedPositionalEncoding(nn.Module):
+    def __init__(self, in_dim=4, num_frequencies=10, sigma=0.01):
+        super().__init__()
+        self.sigma2 = sigma ** 2
+        freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies) * torch.pi
+        self.register_buffer("freq_bands", freq_bands)
+
+    def forward(self, x):
+        # x: (..., in_dim)
+        x_proj = x[..., None] * self.freq_bands  # (..., in_dim, num_freq)
+        attenuation = torch.exp(-0.5 * (self.freq_bands ** 2) * self.sigma2)  # (num_freq,)
+        x_proj = x_proj * attenuation  # broadcast to (..., in_dim, num_freq)
+        x_proj = x_proj.view(*x.shape[:-1], -1)
+        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+    
+
 class FourierFeatureEncoding(nn.Module):
     def __init__(self, in_dim=4, num_frequencies=10):
         super().__init__()
-        self.freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies)
+        freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies)
+        self.register_buffer("freq_bands", freq_bands)
 
     def forward(self, x):
-        x_proj = x[..., None] * self.freq_bands.to(x.device)
+        x_proj = x[..., None] * self.freq_bands  # uses already-on-device buffer
         x_proj = x_proj.view(*x.shape[:-1], -1)
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
 
 class PrimitiveMLP(nn.Module):
     def __init__(self, input_dim=6, hidden_dim=64, num_frequencies=10):
         super().__init__()
-        self.encoder = FourierFeatureEncoding(input_dim, num_frequencies)
+        #self.encoder = FourierFeatureEncoding(input_dim, num_frequencies)
+        self.encoder = IntegratedPositionalEncoding(input_dim, num_frequencies)
+
         self.net = nn.Sequential(
             nn.Linear(input_dim * num_frequencies * 2, hidden_dim),
             nn.ReLU(),
-            # nn.Linear(hidden_dim, hidden_dim),
-            # nn.ReLU(),
+            #nn.Linear(hidden_dim, hidden_dim),
+            #nn.ReLU(),
             nn.Linear(hidden_dim, 4)  # RGB + density
         )
 
@@ -58,7 +79,9 @@ class NeuralPrimitiveScene(nn.Module):
             sampled_positions = initial_positions[indices]
             self.positions = nn.Parameter(sampled_positions.clone().detach())  # make it a learnable parameter
 
-        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 1)  # Learnable per-primitive scale
+        #self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.1)  # Learnable per-primitive scale
+        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.1))
+
 
         self.mlps = nn.ModuleList([
             PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
@@ -91,26 +114,29 @@ class NeuralPrimitiveScene(nn.Module):
         rgb_list = []
         sigma_list = []
 
+        scales = torch.exp(self.log_scales)
+
         for i in range(N):
             dist = vec_perp[i]  # (B, 3)
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
 
-            mask = norm <= self.scales[i]  # (B, 1)
-            """
+            mask = norm <= scales[i]  # (B, 1)
+
             if not mask.any():
                 # If no points are within the scale, return zero RGB and sigma
-                # print(f"Primitive {i} has no points within scale, returning zeros.")
+                #print(f"Primitive {i} has no points within scale, returning zeros.")
                 self.invalid_nums += 1
                 rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
                 sigma_list.append(torch.zeros(B, 1, device=ray_o.device))
                 # TODO log the alpha for pruning
+
                 continue
-            """
+
 
             out = self.mlps[i](ray_d, dist)
 
             # TODO 
-            decay = torch.exp(-norm ** 2 / (2 * self.scales[i] ** 2))  # (B, 1)
+            decay = torch.exp(-norm ** 2 / (2 * scales[i] ** 2))  # (B, 1)
 
             sigma = out[:, 3:] * decay  # soft bound
             rgb = out[:, :3]

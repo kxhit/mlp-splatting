@@ -1,4 +1,7 @@
 import os
+import uuid
+from datetime import datetime
+
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
@@ -16,11 +19,8 @@ import copy
 from utils.loss_utils import ssim
 
 
+"""
 def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
-    """
-    Enforces that each primitive produces consistent outputs for neighboring rays.
-    This encourages local smoothness and reduces high-frequency artifacts.
-    """
     B = ray_o.shape[0]
     N = model.num_primitives
 
@@ -69,33 +69,33 @@ def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
         return torch.tensor(0.0, device=ray_o.device)
     else:
         return loss_total / count
-    """            
-    if epoch%10 == 0:
-                # 新增相邻 ray consistency loss
-                loss_smooth = primitive_consistency_loss(scene, rays_o_batch, rays_d_batch, eps=1e-3)
-                # 总 loss（你可以调节权重）
-                loss += 0.01 * loss_smooth
-    """
-
+"""
 
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda'):
+    # Set saving directory
+    output_root = "/home/yuzhou/Desktop/output"
+    os.makedirs(output_root, exist_ok=True)
+    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    output_dir = os.path.join(output_root, random_tag)
+    os.makedirs(output_dir, exist_ok=True)
+
     dataset = LLFFDataset(data_dir)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    scene = NeuralPrimitiveScene(num_primitives=512, initial_positions=dataset.positions).to(device)
+    scene = NeuralPrimitiveScene(num_primitives=1024, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
     optimizer = torch.optim.Adam([
             {"params": scene.mlps.parameters()},  # 默认 1e-3
-            {"params": scene.scales, "lr":1e-1},             # 默认 1e-3
-            {"params": scene.positions, "lr": 1e-2},  # 提高 10 倍学习率
+            {"params": scene.log_scales, "lr":1e-1},  
+            {"params": scene.positions, "lr": 5e-3},  # 提高 5 倍学习率
         ], lr=1e-3)
 
     #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
 
 
-    ckpt_path = f"scene_epoch_0.pt"
+    ckpt_path = os.path.join(output_dir, f"scene_epoch_0.pt")
     torch.save(scene.state_dict(), ckpt_path)
     print(f"[Checkpoint] Saved model to {ckpt_path}")
 
@@ -114,8 +114,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         
     for epoch in tqdm(range(num_epochs)):
         for rays_o, rays_d, rgbs in dataloader:
-            # rays_o, rays_d, rgbs: [B, H*W, 3]
-            rays_o = rays_o.view(-1, 3).to(device)  # [B*H*W, 3]
+            rays_o = rays_o.view(-1, 3).to(device)  
             rays_d = rays_d.view(-1, 3).to(device)
             rgbs = rgbs.view(-1, 3).to(device)
 
@@ -143,24 +142,24 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         # Prune & densify primitives
         if epoch % 25 == 0 and epoch > 500:
             prune_primitives(scene)
-            MAX_NUM_PRIMITIVES = 512
+            MAX_NUM_PRIMITIVES = 1024
             if scene.num_primitives < MAX_NUM_PRIMITIVES:
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
         # Eval after each epoch (first image only)
         if (epoch + 1) % 50 == 0 or epoch == num_epochs - 1:
-            torch.save(scene.state_dict(), "scene_ckpt_tmp.pt")
+            torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
 
 
-        # Save at epoch 100, 1000, and final
-        if (epoch + 1 == 100) or (epoch + 1 == 1000):
-            ckpt_path = f"scene_epoch_{epoch+1:05d}.pt"
+        # Save at every 5000 epochs
+        if (epoch + 1) % 5000 == 0:
+            ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")
             torch.save(scene.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved model to {ckpt_path}")
 
-    save_model(scene, "scene_ckpt.pt")
+    save_model(scene, os.path.join(output_dir, "scene_ckpt.pt"))
 
 
 def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01):
@@ -173,7 +172,7 @@ def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01):
     print(f"Pruned {scene.num_primitives - keep_indices.numel()} primitives.")
 
     scene.positions = nn.Parameter(scene.positions[keep_indices])
-    scene.scales = nn.Parameter(scene.scales[keep_indices])
+    scene.log_scales = nn.Parameter(scene.log_scales[keep_indices])
     scene.mlps = nn.ModuleList([scene.mlps[i] for i in keep_indices])
     scene.num_primitives = keep_indices.numel()
     scene.alpha_accum = scene.alpha_accum[keep_indices]
@@ -195,11 +194,11 @@ def densify_primitives(scene, num_new=32, noise_scale=0.01, alpha_thresh=0.05):
         selected = candidate_indices
 
     new_positions = scene.positions[selected] + noise_scale * torch.randn_like(scene.positions[selected])
-    new_scales = scene.scales[selected].clone()
+    new_scales = scene.log_scales[selected].clone()
     new_mlps = [copy.deepcopy(scene.mlps[i]) for i in selected]
 
     scene.positions = nn.Parameter(torch.cat([scene.positions, new_positions], dim=0))
-    scene.scales = nn.Parameter(torch.cat([scene.scales, new_scales], dim=0))
+    scene.log_scales = nn.Parameter(torch.cat([scene.log_scales, new_scales], dim=0))
     scene.mlps.extend(new_mlps)
     scene.num_primitives += len(new_mlps)
 

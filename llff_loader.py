@@ -49,9 +49,11 @@ from utils.read_write_model import read_images_binary, read_cameras_binary, read
 
 
 class LLFFDataset(Dataset):
-    def __init__(self, basedir, factor=8):
+    def __init__(self, basedir, factor=8, llffhold=8, split='train'):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
+        self.llffhold = llffhold
+        self.split = split
         self._load_meta(factor)
 
     def _load_meta(self, factor):
@@ -130,9 +132,24 @@ class LLFFDataset(Dataset):
         self.focal = hwf[0, 2] / factor  # 根据下采样因子调整焦距
 
 
-        # 只加载一张调试用
-        self.poses = self.poses[:1]
-        self.images = self.images[:1]
+        # === 按 llffhold 做 train/test 划分 ===
+        num_images = self.images.shape[0]
+        i_test = np.arange(num_images)[::self.llffhold]
+        i_train = np.array([i for i in range(num_images) if i not in i_test])
+
+        if self.split == 'train':
+            select_ids = i_train
+        elif self.split == 'test':
+            select_ids = i_test
+        else:
+            raise ValueError(f"Unknown split type: {self.split}")
+
+        # Apply split
+        self.images = self.images[select_ids]
+        self.poses = self.poses[select_ids]
+
+
+
         print(f"Loaded {len(self.images)} images from {image_dir}")
 
 

@@ -26,11 +26,11 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=128, device='cuda', bloc
         scene.num_primitives = len(mlp_idx)
         scene.mlps = torch.nn.ModuleList([scene.mlps[i] for i in mlp_idx])
         scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
-        scene.scales = torch.nn.Parameter(scene.scales[mlp_idx])
+        scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
     # TODO debug, only viz subset mlps
     # import pdb; pdb.set_trace()
     print('scene positions ', scene.positions)
-    print('scene scales ', scene.scales)
+    print('scene scales ', torch.exp(scene.log_scales))
     pred_rgb = []
     # batch_size = 4096
     batch_size = rays_o.shape[0]
