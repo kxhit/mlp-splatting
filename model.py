@@ -93,6 +93,8 @@ class NeuralPrimitiveScene(nn.Module):
 
         self.invalid_nums = 0
 
+
+    
     def forward(self, ray_o, ray_d):
         self.invalid_nums = 0
         B = ray_o.shape[0]
@@ -168,5 +170,87 @@ class NeuralPrimitiveScene(nn.Module):
         )
         blended = torch.sum(weights * rgb_sorted, dim=0)
         return blended
+    
+    """
+    def forward(self, ray_o, ray_d):
+        self.invalid_nums = 0
+        B = ray_o.shape[0]
+        N = self.num_primitives
+
+        ray_d = F.normalize(ray_d, dim=-1)
+        scales = torch.exp(self.log_scales)  # [N, 1]
+
+        rgb_list = []
+        sigma_list = []
+
+        # Expand to [N, B, 3] for vectorized geometric computation
+        ray_o_expand = ray_o.unsqueeze(0).expand(N, B, 3)
+        ray_d_expand = ray_d.unsqueeze(0).expand(N, B, 3)
+        center_expand = self.positions[:, None, :].expand(N, B, 3)
+
+        vec = center_expand - ray_o_expand  # [N, B, 3]
+        t = torch.sum(vec * ray_d_expand, dim=-1, keepdim=True)  # [N, B, 1]
+        proj = ray_o_expand + t * ray_d_expand
+        vec_perp = center_expand - proj  # [N, B, 3]
+        norm = torch.norm(vec_perp, dim=-1, keepdim=True)  # [N, B, 1]
+        z_vals = t.squeeze(-1)  # [N, B]
+
+        sorted_inds = torch.argsort(z_vals, dim=0)  # sort along N
+
+        for i in range(N):
+            dist_i = vec_perp[i]           # [B, 3]
+            norm_i = norm[i]               # [B, 1]
+            scale_i = scales[i]            # scalar
+            mask = (norm_i <= scale_i)     # [B, 1]
+            valid_idx = mask.squeeze(-1).nonzero(as_tuple=False).squeeze(-1)  # 1D idx list
+
+            if valid_idx.numel() == 0:
+                self.invalid_nums += 1
+                rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
+                sigma_list.append(torch.zeros(B, 1, device=ray_o.device))
+                continue
+
+            # Select valid rays only
+            ray_d_sub = ray_d[valid_idx]       # [Bᵢ, 3]
+            dist_sub = dist_i[valid_idx]       # [Bᵢ, 3]
+            norm_sub = norm_i[valid_idx]       # [Bᵢ, 1]
+
+            out = self.mlps[i](ray_d_sub, dist_sub)  # [Bᵢ, 4]
+            rgb_sub = out[:, :3]
+            sigma_sub = out[:, 3:] * torch.exp(-norm_sub ** 2 / (2 * scale_i ** 2))  # [Bᵢ, 1]
+
+            # Scatter back to full B-length tensors
+            rgb_full = torch.zeros(B, 3, device=ray_o.device)
+            sigma_full = torch.zeros(B, 1, device=ray_o.device)
+            rgb_full[valid_idx] = rgb_sub
+            sigma_full[valid_idx] = sigma_sub
+
+            rgb_list.append(rgb_full)
+            sigma_list.append(sigma_full)
+
+            with torch.no_grad():
+                alpha = 1.0 - torch.exp(-sigma_sub)  # [Bᵢ, 1]
+                alpha_sum = alpha.sum()
+                occ = valid_idx.numel()
+                decay = 0.9
+                self.alpha_accum[i] = (1 - decay) * self.alpha_accum[i] + decay * alpha_sum.detach()
+                self.occupancy_accum[i] = (1 - decay) * self.occupancy_accum[i] + decay * occ
+
+        rgb = torch.stack(rgb_list, dim=0)       # [N, B, 3]
+        sigma = torch.stack(sigma_list, dim=0)   # [N, B, 1]
+
+        # Sort along z for each ray
+        rgb_sorted = torch.gather(rgb, 0, sorted_inds.unsqueeze(-1).expand(-1, -1, 3))       # [N, B, 3]
+        sigma_sorted = torch.gather(sigma, 0, sorted_inds.unsqueeze(-1))                    # [N, B, 1]
+
+        alpha = 1.0 - torch.exp(-sigma_sorted)   # [N, B, 1]
+        weights = alpha * torch.cumprod(
+            torch.cat([torch.ones(1, B, 1, device=alpha.device), 1.0 - alpha + 1e-10], dim=0)[:-1],
+            dim=0
+        )
+        blended = torch.sum(weights * rgb_sorted, dim=0)  # [B, 3]
+
+        return blended
+    """
 
 

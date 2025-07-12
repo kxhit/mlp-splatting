@@ -19,6 +19,7 @@ import copy
 from utils.loss_utils import ssim
 
 
+
 """
 def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
     B = ray_o.shape[0]
@@ -70,6 +71,7 @@ def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
     else:
         return loss_total / count
 """
+
 
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda'):
@@ -147,12 +149,11 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
-        # Eval after each epoch (first image only)
-        if (epoch + 1) % 50 == 0 or epoch == num_epochs - 1:
-            torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
+        # Eval after 500 epoch 
+        if (epoch + 1) % 500 == 0:
+            #torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
-
-
+     
         # Save at every 5000 epochs
         if (epoch + 1) % 5000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")
