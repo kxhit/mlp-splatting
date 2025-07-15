@@ -73,14 +73,51 @@ def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
 """
 
 
+def sample_patch_rays(rays_o, rays_d, rgbs, num_patches_h=4, num_patches_w=4):
+    """
+    从 (N, H, W, 3) 的 rays 中采样一个随机 patch。
+
+    参数:
+        rays_o, rays_d, rgbs: shape (N, H, W, 3)
+        num_patches_h: 高度方向的划分数
+        num_patches_w: 宽度方向的划分数
+
+    返回:
+        rays_o_batch, rays_d_batch, rgbs_batch: shape (patch_H * patch_W, 3)
+    """
+    N, H, W, _ = rays_o.shape
+    patch_H = H // num_patches_h
+    patch_W = W // num_patches_w
+
+    # 随机选图像
+    img_idx = torch.randint(0, N, ()).item()
+
+    # 随机选 patch 行列索引
+    row = torch.randint(0, num_patches_h, ()).item()
+    col = torch.randint(0, num_patches_w, ()).item()
+
+    h0, h1 = row * patch_H, (row + 1) * patch_H
+    w0, w1 = col * patch_W, (col + 1) * patch_W
+
+    # 提取 patch 并 reshape 成 (patch_H * patch_W, 3)
+    rays_o_patch = rays_o[img_idx, h0:h1, w0:w1].reshape(-1, 3)
+    rays_d_patch = rays_d[img_idx, h0:h1, w0:w1].reshape(-1, 3)
+    rgbs_patch   = rgbs[img_idx, h0:h1, w0:w1].reshape(-1, 3)
+
+    return rays_o_patch, rays_d_patch, rgbs_patch
+
+
 
 # 设置用于 position 的 warm-up 和 linear decay 学习率函数
-def get_position_lr(iteration, warmup_steps=500, max_steps=100000, init_lr=5e-3, final_lr=5e-5):
+def get_position_lr(iteration, warmup_steps=500, max_steps=100000, init_lr=5e-3, final_lr=5e-4):
     if iteration < warmup_steps:
-        return final_lr
+        return 5e-4
     else:
-        alpha = (iteration - warmup_steps) / (max_steps - warmup_steps)
-        return init_lr * (1 - alpha) + final_lr * alpha
+        return 5e-3
+    # 线性衰减
+    #else:
+    #    alpha = (iteration - warmup_steps) / (max_steps - warmup_steps)
+    #    return init_lr * (1 - alpha) + final_lr * alpha
 
 
 def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
@@ -109,7 +146,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-1},
-        {"params": scene.positions, "lr": 5e-5},  # 初始设为极小值
+        {"params": scene.positions, "lr": 5e-3},  # 初始设为较小值，保守一些
     ], lr=1e-3)
 
 
@@ -120,6 +157,9 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     torch.save(scene.state_dict(), ckpt_path)
     print(f"[Checkpoint] Saved model to {ckpt_path}")
 
+
+    loss_accum = 0.0
+    loss_count = 0
 
 
     """
@@ -134,28 +174,30 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
         
     for epoch in tqdm(range(num_epochs)):
+
         # Update learning rates
-        mlp_lr = get_mlp_lr(epoch, max_steps=num_epochs)
-        position_lr = get_position_lr(epoch, warmup_steps=500, max_steps=num_epochs)
-        optimizer.param_groups[0]['lr'] = mlp_lr  # param_groups[0] 是 scene.mlps
-        optimizer.param_groups[2]['lr'] = position_lr  # param_groups[2] 是 scene.positions
+        #mlp_lr = get_mlp_lr(epoch, max_steps=num_epochs)
+        #position_lr = get_position_lr(epoch, warmup_steps=500, max_steps=num_epochs)
+        #optimizer.param_groups[0]['lr'] = mlp_lr  # param_groups[0] 是 scene.mlps
+        #optimizer.param_groups[2]['lr'] = position_lr  # param_groups[2] 是 scene.positions
+
 
         for rays_o, rays_d, rgbs in dataloader:
-            print("ray_o.shape, rays_d.shape, rgbs.shape", rays_o.shape, rays_d.shape, rgbs.shape)
-            rays_o = rays_o.view(-1, 3).to(device)  
-            rays_d = rays_d.view(-1, 3).to(device)
-            rgbs = rgbs.view(-1, 3).to(device)
+            rays_o = rays_o.to(device)  
+            rays_d = rays_d.to(device)
+            rgbs = rgbs.to(device)
 
-            assert batch_size <= rays_o.size(0), "Batch size must be less than or equal to the number of rays."
-            rand_idx = torch.randperm(rays_o.size(0))[:batch_size]
-            rays_o_batch = rays_o[rand_idx]
-            rays_d_batch = rays_d[rand_idx]
-            rgbs_batch = rgbs[rand_idx]
+            assert batch_size <= rays_o.reshape(-1,3).size(0), "Batch size must be less than or equal to the number of rays."
+            rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
+                        rays_o, rays_d, rgbs,
+                        num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
+                    )
 
             pred = scene(rays_o_batch, rays_d_batch)
             loss = F.mse_loss(pred, rgbs_batch) 
             optimizer.zero_grad()
             loss.backward()
+            # import pdb; pdb.set_trace()
 
             #print("Position grad norm:", scene.positions.grad.norm().item())
             #with torch.no_grad():
@@ -163,20 +205,30 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
             optimizer.step()
 
-        print(f"[Epoch {epoch+1}] Loss: {loss.item():.6f}")
+        # 累加 loss
+        loss_accum += loss.item()
+        loss_count += 1
+        # 每 100 epoch 打印平均 loss
+        if (epoch + 1) % 100 == 0:
+            avg_loss = loss_accum / loss_count
+            print(f"[Epoch {epoch+1}] avg {loss_count} loss : {avg_loss:.6f}")
+            loss_accum = 0.0
+            loss_count = 0
 
-        #scheduler.step()
+        # TODO wandb
+
+
 
         # Prune & densify primitives
-        if epoch % 25 == 0 and epoch > 500:
+        if epoch % 500 == 0 and epoch > 500:
             prune_primitives(scene)
             MAX_NUM_PRIMITIVES = initial_num_primitives
             if scene.num_primitives < MAX_NUM_PRIMITIVES:
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
-        # Eval after 500 epoch 
-        if (epoch + 1) % 500 == 0:
+        # Eval after 1000 epoch 
+        if (epoch + 1) % 1000 == 0:
             torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
      

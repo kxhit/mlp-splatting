@@ -15,7 +15,7 @@ if __name__ == "__main__":
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
     mlp_idx = list(range(0, 1))
     mlp_idx = None
-    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1000)
+    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
 
 
 
