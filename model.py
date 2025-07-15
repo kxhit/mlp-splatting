@@ -124,6 +124,7 @@ class NeuralPrimitiveScene(nn.Module):
 
             mask = norm <= scales[i]  # (B, 1)
 
+            """
             if not mask.any():
                 # If no points are within the scale, return zero RGB and sigma
                 #print(f"Primitive {i} has no points within scale, returning zeros.")
@@ -133,7 +134,7 @@ class NeuralPrimitiveScene(nn.Module):
                 # TODO log the alpha for pruning
 
                 continue
-
+            """
 
             out = self.mlps[i](ray_d, dist)
 
@@ -171,6 +172,7 @@ class NeuralPrimitiveScene(nn.Module):
         blended = torch.sum(weights * rgb_sorted, dim=0)
         return blended
     
+
     """
     def forward(self, ray_o, ray_d):
         self.invalid_nums = 0

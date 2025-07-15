@@ -148,8 +148,6 @@ class LLFFDataset(Dataset):
         self.images = self.images[select_ids]
         self.poses = self.poses[select_ids]
 
-
-
         print(f"Loaded {len(self.images)} images from {image_dir}")
 
 

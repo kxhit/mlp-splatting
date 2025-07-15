@@ -16,4 +16,4 @@ if __name__ == "__main__":
     set_seed(2025)
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern"
     data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"
-    train_scene_llff(data_dir, num_epochs=100000, batch_size=4096*3)
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=4096*3, initial_num_primitives=1024)

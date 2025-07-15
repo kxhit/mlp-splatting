@@ -74,7 +74,25 @@ def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
 
 
 
-def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda'):
+# 设置用于 position 的 warm-up 和 linear decay 学习率函数
+def get_position_lr(iteration, warmup_steps=500, max_steps=100000, init_lr=5e-3, final_lr=5e-5):
+    if iteration < warmup_steps:
+        return final_lr
+    else:
+        alpha = (iteration - warmup_steps) / (max_steps - warmup_steps)
+        return init_lr * (1 - alpha) + final_lr * alpha
+
+
+def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
+    halfway = max_steps // 2
+    if iteration < halfway:
+        return init_lr
+    else:
+        alpha = (iteration - halfway) / (max_steps - halfway)
+        return init_lr * (1 - alpha) + final_lr * alpha
+
+
+def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
     output_root = "/home/yuzhou/Desktop/output"
     os.makedirs(output_root, exist_ok=True)
@@ -85,14 +103,15 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     dataset = LLFFDataset(data_dir)
     dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-    scene = NeuralPrimitiveScene(num_primitives=1024, initial_positions=dataset.positions).to(device)
+    scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
     optimizer = torch.optim.Adam([
-            {"params": scene.mlps.parameters()},  # 默认 1e-3
-            {"params": scene.log_scales, "lr":1e-1},  
-            {"params": scene.positions, "lr": 5e-3},  # 提高 5 倍学习率
-        ], lr=1e-3)
+        {"params": scene.mlps.parameters()},  # 默认 1e-3
+        {"params": scene.log_scales, "lr": 1e-1},
+        {"params": scene.positions, "lr": 5e-5},  # 初始设为极小值
+    ], lr=1e-3)
+
 
     #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
 
@@ -115,7 +134,14 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
         
     for epoch in tqdm(range(num_epochs)):
+        # Update learning rates
+        mlp_lr = get_mlp_lr(epoch, max_steps=num_epochs)
+        position_lr = get_position_lr(epoch, warmup_steps=500, max_steps=num_epochs)
+        optimizer.param_groups[0]['lr'] = mlp_lr  # param_groups[0] 是 scene.mlps
+        optimizer.param_groups[2]['lr'] = position_lr  # param_groups[2] 是 scene.positions
+
         for rays_o, rays_d, rgbs in dataloader:
+            print("ray_o.shape, rays_d.shape, rgbs.shape", rays_o.shape, rays_d.shape, rgbs.shape)
             rays_o = rays_o.view(-1, 3).to(device)  
             rays_d = rays_d.view(-1, 3).to(device)
             rgbs = rgbs.view(-1, 3).to(device)
@@ -144,21 +170,22 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         # Prune & densify primitives
         if epoch % 25 == 0 and epoch > 500:
             prune_primitives(scene)
-            MAX_NUM_PRIMITIVES = 1024
+            MAX_NUM_PRIMITIVES = initial_num_primitives
             if scene.num_primitives < MAX_NUM_PRIMITIVES:
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
         # Eval after 500 epoch 
         if (epoch + 1) % 500 == 0:
-            #torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
-            evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
+            torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
+            #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
      
         # Save at every 5000 epochs
         if (epoch + 1) % 5000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")
             torch.save(scene.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved model to {ckpt_path}")
+
 
     save_model(scene, os.path.join(output_dir, "scene_ckpt.pt"))
 
