@@ -188,10 +188,21 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             rgbs = rgbs.to(device)
 
             assert batch_size <= rays_o.reshape(-1,3).size(0), "Batch size must be less than or equal to the number of rays."
-            rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
-                        rays_o, rays_d, rgbs,
-                        num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
-                    )
+
+            if epoch % 500 < 500:
+                # 使用随机采样 rays
+                rays_o = rays_o.reshape(-1, 3)
+                rays_d = rays_d.reshape(-1, 3)
+                rgbs = rgbs.reshape(-1, 3)
+                rand_idx = torch.randperm(rays_o.size(0))[:batch_size]
+                rays_o_batch = rays_o[rand_idx]
+                rays_d_batch = rays_d[rand_idx]
+                rgbs_batch = rgbs[rand_idx]
+            else:
+                rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
+                            rays_o, rays_d, rgbs,
+                            num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
+                        )  
 
             pred = scene(rays_o_batch, rays_d_batch)
             loss = F.mse_loss(pred, rgbs_batch) 
@@ -216,7 +227,6 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             loss_count = 0
 
         # TODO wandb
-
 
 
         # Prune & densify primitives

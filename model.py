@@ -122,7 +122,7 @@ class NeuralPrimitiveScene(nn.Module):
             dist = vec_perp[i]  # (B, 3)
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
 
-            mask = norm <= 1.5*scales[i]  # (B, 1)
+            mask = norm <= 2.5*scales[i]  # (B, 1)
 
 
             if not mask.any():

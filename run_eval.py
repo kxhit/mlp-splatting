@@ -9,7 +9,7 @@ if __name__ == "__main__":
     data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"  # change to your scene path
 
 
-    model_ckpt_path = "/home/yuzhou/Desktop/output/1000mlp_decay_global/scene_ckpt_tmp.pt"           # saved model path
+    model_ckpt_path = "/home/yuzhou/Desktop/output/20250716_114811_a83e2322/scene_ckpt_tmp.pt"           # saved model path
 
     
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
