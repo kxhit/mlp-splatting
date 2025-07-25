@@ -2,21 +2,50 @@ from visualize import evaluate_and_visualize
 import torch
 
  
-
+"""
 if __name__ == "__main__":
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern" # change to your scene path
 
     data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"  # change to your scene path
 
 
-    model_ckpt_path = "/home/yuzhou/Desktop/output/20250716_114811_a83e2322/scene_ckpt_tmp.pt"           # saved model path
+    model_ckpt_path = "/home/yuzhou/Desktop/output/20250716_174737_ba2d8537/scene_ckpt_tmp.pt"           # saved model path
 
     
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
     mlp_idx = list(range(0, 1))
     mlp_idx = None
     evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+"""
 
+
+def strip_orig_mod_prefix(state_dict):
+    """Remove '_orig_mod.' prefix in keys, if exists."""
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("_orig_mod."):
+            new_k = k[len("_orig_mod."):]
+        else:
+            new_k = k
+        new_state_dict[new_k] = v
+    return new_state_dict
+
+if __name__ == "__main__":
+    # Change to your scene path
+    data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/1000mlp_position_encoding/scene_epoch_90000.pt"
+
+    model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
+    
+    # ✅ 处理 key 前缀
+    if model_ckpt is not None:
+        model_ckpt = strip_orig_mod_prefix(model_ckpt)
+
+    # 可修改为 list(range(N)) 以渲染所有 MLPs
+    mlp_idx = None
+
+    # 如果训练时是 N=1024 个 primitive，那这里也得一致
+    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
 
 
 

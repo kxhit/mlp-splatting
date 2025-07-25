@@ -122,8 +122,7 @@ class NeuralPrimitiveScene(nn.Module):
             dist = vec_perp[i]  # (B, 3)
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
 
-            mask = norm <= 2.5*scales[i]  # (B, 1)
-
+            mask = norm <= scales[i]  # (B, 1)
 
             if not mask.any():
                 # If no points are within the scale, return zero RGB and sigma
@@ -144,11 +143,10 @@ class NeuralPrimitiveScene(nn.Module):
             sigma = out[:, 3:] * decay  # soft bound
             rgb = out[:, :3]
 
-            valid_mask = mask.float()
+            #valid_mask = mask.float()
             # 用 mask 选择有效的输出，同时保留梯度
-            sigma = sigma * valid_mask #+ (1 - valid_mask) * sigma.detach() 
-            rgb = rgb * valid_mask #+ (1 - valid_mask) * rgb.detach()
-
+            #sigma = sigma * valid_mask #+ (1 - valid_mask) * sigma.detach() 
+            #rgb = rgb * valid_mask #+ (1 - valid_mask) * rgb.detach()
 
 
             rgb_list.append(rgb)

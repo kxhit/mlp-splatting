@@ -1,18 +1,18 @@
 import torch
 import matplotlib.pyplot as plt
 from model import NeuralPrimitiveScene
-from llff_loader import LLFFDataset
+from mip360_loader import mip360Dataset
 
 fig = None
 ax0_img = None
 ax1_img = None
 
 @torch.no_grad()
-def evaluate_and_visualize(data_dir, model_ckpt=None, N=128, device='cuda', block=False, mlp_idx=None):
+def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-
-    dataset = LLFFDataset(data_dir)
-    rays_o, rays_d, rgbs = dataset[0]  # pick first image for evaluation
+    dataset = mip360Dataset(data_dir, split='train')
+    img_idx = 2
+    rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
 
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
     rays_d = rays_d.to(device).view(-1, 3)
@@ -39,8 +39,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=128, device='cuda', bloc
     print('invalid num ', scene.invalid_nums)
     pred_rgb = torch.cat(pred_rgb, dim=0)
 
-    pred_img = pred_rgb.view(1, 378, 504, 3).clamp(0, 1).cpu()
-    gt_img = gt_rgb.view(1, 378, 504, 3).cpu()
+    pred_img = pred_rgb.view(1, 520, 780, 3).clamp(0, 1).cpu()
+    gt_img = gt_rgb.view(1, 520, 780, 3).cpu()
     
 
     psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
@@ -62,4 +62,5 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=128, device='cuda', bloc
         fig.canvas.flush_events()
 
     plt.pause(0.001)
+    plt.savefig("img_{img_idx}_mlp_{mlp_idx}.png".format(img_idx=img_idx, mlp_idx=mlp_idx if mlp_idx is not None else "all"))
     plt.show(block=block)

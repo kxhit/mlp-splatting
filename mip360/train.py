@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 from model import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
-from llff_loader import LLFFDataset
+from mip360_loader import mip360Dataset
 from tqdm import tqdm
 from save_model import save_model
 from visualize import evaluate_and_visualize
@@ -131,14 +131,14 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
-    output_root = "/home/yuzhou/Desktop/output"
+    output_root = "/home/yuzhou/Desktop/output/mip360"
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
-    dataset = LLFFDataset(data_dir)
-    dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+    dataset = mip360Dataset(data_dir)
+    dataloader = DataLoader(dataset, batch_size=200, shuffle=True)
 
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
@@ -189,6 +189,16 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
             assert batch_size <= rays_o.reshape(-1,3).size(0), "Batch size must be less than or equal to the number of rays."
 
+            # 使用随机采样 rays
+            rays_o = rays_o.reshape(-1, 3)
+            rays_d = rays_d.reshape(-1, 3)
+            rgbs = rgbs.reshape(-1, 3)
+            rand_idx = torch.randperm(rays_o.size(0))[:batch_size]
+            rays_o_batch = rays_o[rand_idx]
+            rays_d_batch = rays_d[rand_idx]
+            rgbs_batch = rgbs[rand_idx]
+
+            """
             if epoch % 500 < 500:
                 # 使用随机采样 rays
                 rays_o = rays_o.reshape(-1, 3)
@@ -203,6 +213,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
                             rays_o, rays_d, rgbs,
                             num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
                         )  
+            """
 
             pred = scene(rays_o_batch, rays_d_batch)
             loss = F.mse_loss(pred, rgbs_batch) 
@@ -237,13 +248,13 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
                 densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
-        # Eval after 1000 epoch 
-        if (epoch + 1) % 1000 == 0:
+        # Eval after 500 epoch 
+        if (epoch + 1) % 500 == 0:
             torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
      
-        # Save at every 5000 epochs
-        if (epoch + 1) % 5000 == 0:
+        # Save at every 1000 epochs
+        if (epoch + 1) % 1000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")
             torch.save(scene.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved model to {ckpt_path}")
