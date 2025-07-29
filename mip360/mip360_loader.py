@@ -63,6 +63,7 @@ class mip360Dataset(Dataset):
         cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
         image_ids_sorted = sorted(images.keys())
+
         poses = []
         hwf_list = []
         for image_id in image_ids_sorted:
@@ -177,3 +178,47 @@ class mip360Dataset(Dataset):
         rays_o = c2w[:3, 3].expand(rays_d.shape)
 
         return rays_o, rays_d
+    
+
+    def get_all_rays(self, device=None, return_img_ids=False):
+        """
+        默认放在 CPU；只有当你显式传入 device（如 'cuda'）时才会搬过去。
+        """
+        rays_o_list, rays_d_list, rgbs_list = [], [], []
+        img_id_list = [] if return_img_ids else None
+
+        for i in range(len(self.images)):
+            img  = self.images[i]                 # (3, H, W)
+            pose = self.poses[i]                  # (3, 4)
+            H, W = img.shape[1:]
+
+            rays_o, rays_d = self._get_rays((H, W), pose)  # (H, W, 3)
+            rays_o = rays_o.reshape(-1, 3)
+            rays_d = rays_d.reshape(-1, 3)
+            rgbs   = img.permute(1, 2, 0).reshape(-1, 3)
+
+            rays_o_list.append(rays_o)
+            rays_d_list.append(rays_d)
+            rgbs_list.append(rgbs)
+
+            if return_img_ids:
+                img_id_list.append(torch.full((H * W,), i, dtype=torch.long))
+
+        rays_o = torch.cat(rays_o_list, dim=0)
+        rays_d = torch.cat(rays_d_list, dim=0)
+        rgbs   = torch.cat(rgbs_list,   dim=0)
+
+        if return_img_ids:
+            img_ids = torch.cat(img_id_list, dim=0)
+
+        # 只有当你想放到 GPU 时才传 device
+        if device is not None:
+            rays_o = rays_o.to(device, non_blocking=True)
+            rays_d = rays_d.to(device, non_blocking=True)
+            rgbs   = rgbs.to(device, non_blocking=True)
+            if return_img_ids:
+                img_ids = img_ids.to(device, non_blocking=True)
+
+        if return_img_ids:
+            return rays_o, rays_d, rgbs, img_ids
+        return rays_o, rays_d, rgbs

@@ -10,8 +10,8 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='train')
-    img_idx = 2
+    dataset = mip360Dataset(data_dir, split='test')
+    img_idx = 26
     rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
 
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
@@ -32,8 +32,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
     print('scene positions ', scene.positions)
     print('scene scales ', torch.exp(scene.log_scales))
     pred_rgb = []
-    #batch_size = 20000
-    batch_size = rays_o.shape[0]
+    batch_size = 100000
+    #batch_size = rays_o.shape[0]
     for i in range(0, rays_o.shape[0], batch_size):
         pred_rgb.append(scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]))
     print('invalid num ', scene.invalid_nums)
@@ -62,5 +62,5 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         fig.canvas.flush_events()
 
     plt.pause(0.001)
-    plt.savefig("img_{img_idx}_mlp_{mlp_idx}.png".format(img_idx=img_idx, mlp_idx=mlp_idx if mlp_idx is not None else "all"))
+    #plt.savefig("img_{img_idx}_mlp_{mlp_idx}.png".format(img_idx=img_idx, mlp_idx=mlp_idx if mlp_idx is not None else "all"))
     plt.show(block=block)

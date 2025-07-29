@@ -138,8 +138,6 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     os.makedirs(output_dir, exist_ok=True)
 
     dataset = mip360Dataset(data_dir)
-    dataloader = DataLoader(dataset, batch_size=200, shuffle=True)
-
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
@@ -172,7 +170,18 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     print(f"[Checkpoint] Partially loaded model from scene_ckpt_tmp.pt (matched {len(ckpt_dict)} tensors)")
     """
 
-        
+    rays_o_all, rays_d_all, rgbs_all = dataset.get_all_rays(device=None)
+    rays_o_all = rays_o_all.pin_memory()
+    rays_d_all = rays_d_all.pin_memory()
+    rgbs_all   = rgbs_all.pin_memory()
+
+    N = rays_o_all.shape[0]
+    assert batch_size <= N, "Batch size must be less than or equal to the number of rays."
+    perm = torch.randperm(N)
+    ptr = 0
+
+
+    # 训练循环
     for epoch in tqdm(range(num_epochs)):
 
         # Update learning rates
@@ -181,14 +190,21 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         #optimizer.param_groups[0]['lr'] = mlp_lr  # param_groups[0] 是 scene.mlps
         #optimizer.param_groups[2]['lr'] = position_lr  # param_groups[2] 是 scene.positions
 
+        if ptr + batch_size > N:
+            perm = torch.randperm(N)
+            ptr = 0
 
-        for rays_o, rays_d, rgbs in dataloader:
-            rays_o = rays_o.to(device)  
-            rays_d = rays_d.to(device)
-            rgbs = rgbs.to(device)
+        idx = perm[ptr:ptr + batch_size]
+        ptr += batch_size
 
-            assert batch_size <= rays_o.reshape(-1,3).size(0), "Batch size must be less than or equal to the number of rays."
+        
+        rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
+        rays_d_batch = rays_d_all[idx].to(device, non_blocking=True)
+        rgbs_batch   = rgbs_all[idx].to(device, non_blocking=True)
 
+
+        """
+        if epoch % 500 < 500:
             # 使用随机采样 rays
             rays_o = rays_o.reshape(-1, 3)
             rays_d = rays_d.reshape(-1, 3)
@@ -197,35 +213,26 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             rays_o_batch = rays_o[rand_idx]
             rays_d_batch = rays_d[rand_idx]
             rgbs_batch = rgbs[rand_idx]
+        else:
+            rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
+                        rays_o, rays_d, rgbs,
+                        num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
+                    )  
+        """
 
-            """
-            if epoch % 500 < 500:
-                # 使用随机采样 rays
-                rays_o = rays_o.reshape(-1, 3)
-                rays_d = rays_d.reshape(-1, 3)
-                rgbs = rgbs.reshape(-1, 3)
-                rand_idx = torch.randperm(rays_o.size(0))[:batch_size]
-                rays_o_batch = rays_o[rand_idx]
-                rays_d_batch = rays_d[rand_idx]
-                rgbs_batch = rgbs[rand_idx]
-            else:
-                rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
-                            rays_o, rays_d, rgbs,
-                            num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
-                        )  
-            """
+        optimizer.zero_grad()                       # 1. 清梯度
+        pred = scene(rays_o_batch, rays_d_batch)    # 2. 前向
+        loss = F.mse_loss(pred, rgbs_batch)         # 3. 计算 loss
+        loss.backward()                             # 4. 反向传播
 
-            pred = scene(rays_o_batch, rays_d_batch)
-            loss = F.mse_loss(pred, rgbs_batch) 
-            optimizer.zero_grad()
-            loss.backward()
-            # import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
-            #print("Position grad norm:", scene.positions.grad.norm().item())
-            #with torch.no_grad():
-                #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
+        #print("Position grad norm:", scene.positions.grad.norm().item())
+        #with torch.no_grad():
+            #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
 
-            optimizer.step()
+        optimizer.step()                            # 5. 更新参数
+
 
         # 累加 loss
         loss_accum += loss.item()
@@ -252,7 +259,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         if (epoch + 1) % 500 == 0:
             torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
-     
+        
         # Save at every 1000 epochs
         if (epoch + 1) % 1000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")

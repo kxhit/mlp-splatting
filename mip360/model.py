@@ -80,7 +80,7 @@ class NeuralPrimitiveScene(nn.Module):
             self.positions = nn.Parameter(sampled_positions.clone().detach())  # make it a learnable parameter
 
         #self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.1)  # Learnable per-primitive scale
-        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.1))
+        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.05))
 
 
         self.mlps = nn.ModuleList([

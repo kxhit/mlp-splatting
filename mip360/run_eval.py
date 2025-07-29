@@ -32,8 +32,8 @@ def strip_orig_mod_prefix(state_dict):
 
 if __name__ == "__main__":
     # Change to your scene path
-    data_dir = "/home/yuzhou/Desktop/datasets/nerf_llff_data/fern"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/1000mlp_position_encoding/scene_epoch_90000.pt"
+    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250725_190455_3343478e//scene_epoch_100000.pt"
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
     
