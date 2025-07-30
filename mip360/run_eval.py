@@ -33,7 +33,7 @@ def strip_orig_mod_prefix(state_dict):
 if __name__ == "__main__":
     # Change to your scene path
     data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250725_190455_3343478e//scene_epoch_100000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250729_175040_aad029ac/scene_epoch_62000.pt"
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
     
@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
     # 可修改为 list(range(N)) 以渲染所有 MLPs
     mlp_idx = None
+
 
     # 如果训练时是 N=1024 个 primitive，那这里也得一致
     evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)

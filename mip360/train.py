@@ -249,10 +249,10 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
         # Prune & densify primitives
         if epoch % 500 == 0 and epoch > 500:
-            prune_primitives(scene)
-            MAX_NUM_PRIMITIVES = initial_num_primitives
-            if scene.num_primitives < MAX_NUM_PRIMITIVES:
-                densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
+            #prune_primitives(scene)
+            #MAX_NUM_PRIMITIVES = initial_num_primitives
+            #if scene.num_primitives < MAX_NUM_PRIMITIVES:
+            #    densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
             print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
 
         # Eval after 500 epoch 

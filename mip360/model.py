@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.spatial import cKDTree
 
 
 class IntegratedPositionalEncoding(nn.Module):
@@ -62,7 +63,7 @@ class NeuralPrimitiveScene(nn.Module):
         super().__init__()
         self.num_primitives = num_primitives
 
-
+        # ======= Inside your class =======
         if initial_positions == None:
             bound = 1.0
             # self.positions = nn.Parameter(torch.randn(num_primitives, 3))
@@ -80,8 +81,7 @@ class NeuralPrimitiveScene(nn.Module):
             self.positions = nn.Parameter(sampled_positions.clone().detach())  # make it a learnable parameter
 
         #self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.1)  # Learnable per-primitive scale
-        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.05))
-
+        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.1))
 
         self.mlps = nn.ModuleList([
             PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
@@ -92,6 +92,33 @@ class NeuralPrimitiveScene(nn.Module):
         self.register_buffer("occupancy_accum", torch.zeros(num_primitives))
 
         self.invalid_nums = 0
+
+    def farthest_point_sampling(self, points, num_samples):
+        """
+        Farthest Point Sampling (FPS)
+        Args:
+            points: (N, 3) input point cloud
+            num_samples: number of samples to select
+        Returns:
+            indices: (num_samples,) indices of selected points
+        """
+        N = points.shape[0]
+        selected_inds = torch.zeros(num_samples, dtype=torch.long, device=points.device)
+        distances = torch.full((N,), float('inf'), device=points.device)
+
+        # randomly pick first point
+        farthest = torch.randint(0, N, (1,), device=points.device)
+        selected_inds[0] = farthest
+
+        for i in range(1, num_samples):
+            dist = torch.cdist(points[farthest].unsqueeze(0), points, p=2).squeeze(0)
+            distances = torch.minimum(distances, dist)
+            farthest = torch.argmax(distances)
+            selected_inds[i] = farthest
+
+        return selected_inds
+
+
 
 
     
@@ -133,6 +160,12 @@ class NeuralPrimitiveScene(nn.Module):
                 # TODO log the alpha for pruning
 
                 #continue
+
+            if scales[i] < 0.01 or scales[i] > 200:
+                #print(f"Primitive {i} has scale < 0.001, skipping.")
+                rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
+                sigma_list.append(torch.zeros(B, 1, device=ray_o.device))
+                continue
 
 
             out = self.mlps[i](ray_d, dist)
