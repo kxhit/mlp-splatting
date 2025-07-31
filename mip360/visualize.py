@@ -11,7 +11,7 @@ ax1_img = None
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
     dataset = mip360Dataset(data_dir, split='test')
-    img_idx = 36
+    img_idx = 46
     rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
 
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
@@ -33,8 +33,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
     print('scene scales ', torch.exp(scene.log_scales))
 
     scales = torch.exp(scene.log_scales)
-    num_small_scales = (scales < 0.01).sum().item()
-    print('Number of scales < 0.01:', num_small_scales)
+    num_small_scales = (scales > 10).sum().item()
+    print('Number of scales > 10:', num_small_scales)
 
     top10_values, top10_indices = torch.topk(scales.view(-1), k=10, largest=True)
     print("Top 10 largest scales:")
@@ -50,7 +50,6 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
 
     pred_img = pred_rgb.view(1, 260, 390, 3).clamp(0, 1).cpu()
     gt_img = gt_rgb.view(1, 260, 390, 3).cpu()
-    
 
     psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
 

@@ -270,11 +270,20 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     save_model(scene, os.path.join(output_dir, "scene_ckpt.pt"))
 
 
-def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01):
+def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01, scale_min=0.01, scale_max=10.0):
     alpha = scene.alpha_accum
     occ = scene.occupancy_accum
 
-    keep_mask = (alpha > alpha_thresh) & (occ > occupancy_thresh)
+    # 将 log_scale 转换为 scale（假设 shape 为 (N, 1)）
+    scales = torch.exp(scene.log_scales).squeeze(-1)  # shape: (N,)
+
+    # alpha + occupancy + scale 限制
+    keep_mask = (
+        (alpha > alpha_thresh) &
+        (occ > occupancy_thresh) &
+        (scales > scale_min) &
+        (scales < scale_max)
+    )
     keep_indices = torch.nonzero(keep_mask).squeeze(-1)
 
     print(f"Pruned {scene.num_primitives - keep_indices.numel()} primitives.")
@@ -286,27 +295,71 @@ def prune_primitives(scene, alpha_thresh=0.01, occupancy_thresh=0.01):
     scene.alpha_accum = scene.alpha_accum[keep_indices]
     scene.occupancy_accum = scene.occupancy_accum[keep_indices]
 
-def densify_primitives(scene, num_new=32, noise_scale=0.01, alpha_thresh=0.05):
-    # 筛选出 alpha 大于阈值的 primitive
-    candidate_mask = scene.alpha_accum > alpha_thresh
-    candidate_indices = torch.nonzero(candidate_mask).squeeze(-1)
 
-    if candidate_indices.numel() == 0:
-        print("No suitable primitives found for densification.")
+
+def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.1, shrink_factor=1.6, num_new=32):
+    grad = scene.positions.grad          # (N, 3)
+    grad_norm = torch.norm(grad, dim=1)  # (N,)
+    log_scales = scene.log_scales.squeeze(-1)  # (N,)
+    scales = torch.exp(log_scales)
+
+    # 找出 grad_norm 大于阈值的 primitive
+    mask = grad_norm > grad_thresh
+    if not mask.any():
+        print("No primitives met gradient threshold for densification.")
         return
 
-    # 从中选择最多 num_new 个进行 densify（可随机，也可 topk）
-    if candidate_indices.numel() > num_new:
-        selected = candidate_indices[torch.randperm(candidate_indices.numel())[:num_new]]
-    else:
-        selected = candidate_indices
+    indices = torch.nonzero(mask).squeeze(-1)
+    grad_norm_valid = grad_norm[indices]
 
-    new_positions = scene.positions[selected] + noise_scale * torch.randn_like(scene.positions[selected])
-    new_scales = scene.log_scales[selected].clone()
-    new_mlps = [copy.deepcopy(scene.mlps[i]) for i in selected]
+    # 只保留前 num_new 个（按 grad_norm 降序）
+    topk = min(num_new, indices.numel())
+    _, topk_order = torch.topk(grad_norm_valid, k=topk)
+    selected_indices = indices[topk_order]
+
+    # 分类：大 scale / 小 scale
+    selected_scales = scales[selected_indices]
+    selected_log_scales = log_scales[selected_indices]
+    selected_grad = grad[selected_indices]
+    selected_pos = scene.positions[selected_indices]
+
+    mask_large = selected_scales > scale_thresh
+    mask_small = ~mask_large
+
+    # --- Case 1: scale > threshold ---
+    pos_large = selected_pos[mask_large]
+    scale_large = selected_scales[mask_large] / shrink_factor
+    log_scale_large = torch.log(scale_large)
+
+    # 更新原始 primitive（scale /= shrink_factor）
+    scene.positions.data[selected_indices[mask_large]] = pos_large
+    scene.log_scales.data[selected_indices[mask_large]] = log_scale_large.unsqueeze(-1)
+
+    # 复制：加高斯噪声
+    noise = torch.randn_like(pos_large)
+    new_pos_large = pos_large + scale_large.unsqueeze(1) * noise
+    new_log_scale_large = log_scale_large
+    new_mlps_large = [copy.deepcopy(scene.mlps[i]) for i in selected_indices[mask_large].tolist()]
+
+    # --- Case 2: scale <= threshold ---
+    pos_small = selected_pos[mask_small]
+    scale_small = selected_scales[mask_small]
+    log_scale_small = selected_log_scales[mask_small]
+    grad_small = selected_grad[mask_small]
+
+    direction = grad_small / (grad_small.norm(dim=1, keepdim=True) + 1e-8)
+    offset = direction * scale_small.unsqueeze(-1)
+    new_pos_small = pos_small + offset
+    new_log_scale_small = log_scale_small
+    new_mlps_small = [copy.deepcopy(scene.mlps[i]) for i in selected_indices[mask_small].tolist()]
+
+    # 合并新增 primitive
+    new_positions = torch.cat([new_pos_large, new_pos_small], dim=0)
+    new_log_scales = torch.cat([new_log_scale_large, new_log_scale_small], dim=0)
+    new_mlps = new_mlps_large + new_mlps_small
 
     scene.positions = nn.Parameter(torch.cat([scene.positions, new_positions], dim=0))
-    scene.log_scales = nn.Parameter(torch.cat([scene.log_scales, new_scales], dim=0))
+    scene.log_scales = nn.Parameter(torch.cat([scene.log_scales, new_log_scales.unsqueeze(-1)], dim=0))
     scene.mlps.extend(new_mlps)
     scene.num_primitives += len(new_mlps)
 
@@ -316,4 +369,5 @@ def densify_primitives(scene, num_new=32, noise_scale=0.01, alpha_thresh=0.05):
     scene.alpha_accum = torch.cat([scene.alpha_accum, zeros], dim=0)
     scene.occupancy_accum = torch.cat([scene.occupancy_accum, zeros], dim=0)
 
-    print(f"Densify: {len(new_mlps)} new primitives added (alpha_thresh={alpha_thresh}).")
+    print(f"Densified {len(new_mlps)} new primitives (max {num_new}, grad_thresh={grad_thresh}).")
+
