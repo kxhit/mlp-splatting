@@ -155,13 +155,11 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-1},
-        {"params": scene.positions, "lr": 5e-2},  
+        {"params": scene.positions, "lr": 1e-1},  
     ], lr=1e-3)
 
 
     #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
-
-
 
     loss_accum = 0.0
     loss_count = 0
@@ -253,8 +251,6 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         print("Corresponding mlp scales:", scales[topk_indices])
         """
 
-        optimizer.step()                            # 5. 更新参数
-
 
         # 累加 loss
         loss_accum += loss.item()
@@ -287,8 +283,11 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         # TODO wandb
 
 
+        optimizer.step()                            # 5. 更新参数
 
-def prune_primitives(scene, alpha_thresh=0.1, occupancy_thresh=0.01, scale_min=0.02, scale_max=5.0):
+
+
+def prune_primitives(scene, alpha_thresh=0.00, occupancy_thresh=0.01, scale_min=0.01, scale_max=2.0):
     alpha = scene.alpha_accum
     occ = scene.occupancy_accum
 
@@ -314,7 +313,7 @@ def prune_primitives(scene, alpha_thresh=0.1, occupancy_thresh=0.01, scale_min=0
 
 
 
-def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.2, shrink_factor=1.6, num_new=32):
+def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.00, shrink_factor=2, num_new=32):
     grad = scene.positions.grad          # (N, 3)
     grad_norm = torch.norm(grad, dim=1)  # (N,)
     log_scales = scene.log_scales.squeeze(-1)  # (N,)
@@ -347,14 +346,17 @@ def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.2, shrink_factor
     scale_large = selected_scales[mask_large] / shrink_factor
     log_scale_large = torch.log(scale_large)
 
-    # 更新原始 primitive（scale /= shrink_factor）
+    # 复制：加高斯噪声
+    noise1 = torch.randn_like(pos_large)
+    noise2 = torch.randn_like(pos_large)
+    new_pos_large1 = pos_large + scale_large.unsqueeze(1) * noise1
+    new_pos_large2 = pos_large + scale_large.unsqueeze(1) * noise2
+    #new_pos_large = pos_large
+
+    # 更新原始 primitive（scale /= shrink_factor, pose += noise）
     with torch.no_grad():
         scene.log_scales[selected_indices[mask_large]] = log_scale_large.unsqueeze(-1)
-
-    # 复制：加高斯噪声
-    #noise = torch.randn_like(pos_large)
-    #new_pos_large = pos_large + scale_large.unsqueeze(1) * noise
-    new_pos_large = pos_large
+        scene.positions[selected_indices[mask_large]] = new_pos_large1
 
     new_log_scale_large = log_scale_large
     new_mlps_large = [copy.deepcopy(scene.mlps[i]) for i in selected_indices[mask_large].tolist()]
@@ -365,7 +367,7 @@ def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.2, shrink_factor
     new_mlps_small = [copy.deepcopy(scene.mlps[i]) for i in selected_indices[mask_small].tolist()]
 
     # 合并新增 primitive
-    new_positions = torch.cat([new_pos_large, new_pos_small], dim=0)
+    new_positions = torch.cat([new_pos_large2, new_pos_small], dim=0)
     new_log_scales = torch.cat([new_log_scale_large, new_log_scale_small], dim=0)
     new_mlps = new_mlps_large + new_mlps_small
 

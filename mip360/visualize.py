@@ -69,6 +69,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         fig.canvas.draw()
         fig.canvas.flush_events()
 
+    a = mlp_idx[0]
+    b = mlp_idx[-1]
     plt.pause(0.001)
-    #plt.savefig("img_{img_idx}_mlp_{mlp_idx}.png".format(img_idx=img_idx, mlp_idx=mlp_idx if mlp_idx is not None else "all"))
+    plt.savefig("img_{img_idx}_mlp_{a}_{b}.png".format(img_idx=img_idx, a=a, b=b))
     plt.show(block=block)
