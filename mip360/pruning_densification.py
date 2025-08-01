@@ -154,8 +154,8 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 5e-3},
-        {"params": scene.positions, "lr": 5e-3},  
+        {"params": scene.log_scales, "lr": 1e-1},
+        {"params": scene.positions, "lr": 5e-2},  
     ], lr=1e-3)
 
 
@@ -259,15 +259,15 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         # 累加 loss
         loss_accum += loss.item()
         loss_count += 1
-        # 每 1000 epoch 进行 pruning 和 densification
-        if (epoch) % 1000 == 0:
+        # 每 5000 epoch 进行 pruning 和 densification
+        if (epoch) % 5000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch:05d}.pt")
             torch.save(scene.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved model to {ckpt_path}")
 
             MAX_NUM_PRIMITIVES = initial_num_primitives
             if scene.num_primitives < MAX_NUM_PRIMITIVES:
-                densify_primitives(scene, num_new=MAX_NUM_PRIMITIVES - scene.num_primitives)
+                densify_primitives(scene, num_new=min(50, MAX_NUM_PRIMITIVES - scene.num_primitives))
             prune_primitives(scene)
 
 
@@ -281,16 +281,16 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             scales = torch.exp(scene.log_scales)
             num_large_scales = (scales > 5).sum().item()
             num_small_scales = (scales < 0.02).sum().item()
-            print(f"Number of scales > 5: {num_large_scales}")
-            print(f"Number of scales < 0.02: {num_small_scales}")
-
-
+            #print(f"Number of scales > 5: {num_large_scales}")
+            #print(f"Number of scales < 0.02: {num_small_scales}")
 
         # TODO wandb
 
 
-def prune_primitives(scene, alpha_thresh=0.1, scale_min=0.02, scale_max=5.0):
+
+def prune_primitives(scene, alpha_thresh=0.1, occupancy_thresh=0.01, scale_min=0.02, scale_max=5.0):
     alpha = scene.alpha_accum
+    occ = scene.occupancy_accum
 
     # 将 log_scale 转换为 scale（假设 shape 为 (N, 1)）
     scales = torch.exp(scene.log_scales).squeeze(-1)  # shape: (N,)
@@ -352,8 +352,10 @@ def densify_primitives(scene, grad_thresh=0.002, scale_thresh=0.2, shrink_factor
         scene.log_scales[selected_indices[mask_large]] = log_scale_large.unsqueeze(-1)
 
     # 复制：加高斯噪声
-    noise = torch.randn_like(pos_large)
-    new_pos_large = pos_large + scale_large.unsqueeze(1) * noise
+    #noise = torch.randn_like(pos_large)
+    #new_pos_large = pos_large + scale_large.unsqueeze(1) * noise
+    new_pos_large = pos_large
+
     new_log_scale_large = log_scale_large
     new_mlps_large = [copy.deepcopy(scene.mlps[i]) for i in selected_indices[mask_large].tolist()]
 

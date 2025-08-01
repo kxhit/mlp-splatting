@@ -180,12 +180,14 @@ class NeuralPrimitiveScene(nn.Module):
             #sigma = sigma * valid_mask #+ (1 - valid_mask) * sigma.detach() 
             #rgb = rgb * valid_mask #+ (1 - valid_mask) * rgb.detach()
 
+
             rgb_list.append(rgb)
             sigma_list.append(sigma)
 
+            # TODO 
             with torch.no_grad():
                 alpha = 1.0 - torch.exp(-sigma)
-                alpha_mean = (alpha.squeeze(-1) * mask.float().squeeze(-1)).mean()
+                alpha_mean = (alpha.squeeze(-1) * mask.float().squeeze(-1)).sum()
                 self.alpha_accum[i] = 0.2 * self.alpha_accum[i] + 0.8 * alpha_mean.detach()
 
         rgb = torch.stack(rgb_list, dim=0)

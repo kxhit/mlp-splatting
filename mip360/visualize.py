@@ -10,8 +10,8 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
-    img_idx = 46
+    dataset = mip360Dataset(data_dir, split='train')
+    img_idx = 200
     rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
 
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
@@ -29,16 +29,16 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
     # TODO debug, only viz subset mlps
     # import pdb; pdb.set_trace()
-    print('scene positions ', scene.positions)
+    #print('scene positions ', scene.positions)
     print('scene scales ', torch.exp(scene.log_scales))
 
     scales = torch.exp(scene.log_scales)
     num_small_scales = (scales > 10).sum().item()
     print('Number of scales > 10:', num_small_scales)
 
-    top10_values, top10_indices = torch.topk(scales.view(-1), k=10, largest=True)
-    print("Top 10 largest scales:")
-    print(top10_values)
+    #top10_values, top10_indices = torch.topk(scales.view(-1), k=10, largest=True)
+    #print("Top 10 largest scales:")
+    #print(top10_values)
 
     pred_rgb = []
     batch_size = 100000
