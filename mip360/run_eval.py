@@ -1,6 +1,9 @@
 from visualize import evaluate_and_visualize
 import torch
-
+import os
+from datetime import datetime
+import uuid
+from tqdm import tqdm
  
 """
 if __name__ == "__main__":
@@ -31,10 +34,16 @@ def strip_orig_mod_prefix(state_dict):
     return new_state_dict
 
 if __name__ == "__main__":
-    # Change to your scene path
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250731_215818_67f2c929/scene_epoch_80000.pt"
+    # TODO Change to your scene path
+    # data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
+    # model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250731_215818_67f2c929/scene_epoch_80000.pt"
+    data_dir = "/home/xin/data/mipnerf360/bonsai"
+    model_ckpt_path = "scene_epoch_62000.pt"
 
+    output_root = "./logs/"
+    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    output_dir = os.path.join(output_root, random_tag)
+    os.makedirs(output_dir, exist_ok=True)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
     
     # ✅ 处理 key 前缀
@@ -42,11 +51,14 @@ if __name__ == "__main__":
         model_ckpt = strip_orig_mod_prefix(model_ckpt)
 
     # 可修改为 list(range(N)) 以渲染所有 MLPs
-    mlp_idx = list(range(894, 895))  
-    #mlp_idx = None
+    # mlp_idx = list(range(894, 895))
+    mlp_idx = list(range(1024))
 
     # 如果训练时是 N=1024 个 primitive，那这里也得一致
-    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+    evaluate_and_visualize(data_dir, output_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+
+    # loop over all primitives and save each rendered image
+    evaluate_and_visualize(data_dir, output_dir, model_ckpt=model_ckpt, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
 
 
 

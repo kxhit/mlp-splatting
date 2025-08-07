@@ -120,7 +120,7 @@ class NeuralPrimitiveScene(nn.Module):
 
 
     
-    def forward(self, ray_o, ray_d):
+    def forward(self, ray_o, ray_d, mlp_id=None):
         self.invalid_nums = 0
         B = ray_o.shape[0]
         N = self.num_primitives
@@ -135,15 +135,20 @@ class NeuralPrimitiveScene(nn.Module):
         proj = ray_o_expand + t * ray_d_expand
         vec_perp = center_expand - proj
 
-        z_vals = t.squeeze(-1)
-        sorted_inds = torch.argsort(z_vals, dim=0)
-
         rgb_list = []
         sigma_list = []
 
         scales = torch.exp(self.log_scales)
 
-        for i in range(N):
+        if mlp_id is None:
+            mlp_id = torch.arange(N, device=ray_o.device)
+            z_vals = t.squeeze(-1)
+            sorted_inds = torch.argsort(z_vals, dim=0)
+        else:
+            z_vals = t.squeeze(-1)[mlp_id]
+            sorted_inds = torch.argsort(z_vals, dim=0)
+
+        for i in mlp_id:
             dist = vec_perp[i]  # (B, 3)
             norm = torch.norm(dist, dim=-1, keepdim=True)  # (B, 1)
 
@@ -192,7 +197,6 @@ class NeuralPrimitiveScene(nn.Module):
 
         rgb = torch.stack(rgb_list, dim=0)
         sigma = torch.stack(sigma_list, dim=0)
-
         rgb_sorted = torch.gather(rgb, 0, sorted_inds.unsqueeze(-1).expand(-1, -1, 3))
         sigma_sorted = torch.gather(sigma, 0, sorted_inds.unsqueeze(-1))
 
