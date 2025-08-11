@@ -4,6 +4,8 @@ import os
 from datetime import datetime
 import uuid
 from tqdm import tqdm
+from mip360_loader import mip360Dataset
+
  
 """
 if __name__ == "__main__":
@@ -45,6 +47,9 @@ if __name__ == "__main__":
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
+
+    dataset = mip360Dataset(data_dir, split='train')
+
     
     # ✅ 处理 key 前缀
     if model_ckpt is not None:
@@ -54,13 +59,15 @@ if __name__ == "__main__":
     # mlp_idx = list(range(894, 895))
     mlp_idx = list(range(1024))
 
-    # 如果训练时是 N=1024 个 primitive，那这里也得一致
-    evaluate_and_visualize(data_dir, output_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+    # # 如果训练时是 N=1024 个 primitive，那这里也得一致
+    # evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+    #
+    # # loop over all primitives and save each rendered image
+    # evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
 
-    # loop over all primitives and save each rendered image
-    evaluate_and_visualize(data_dir, output_dir, model_ckpt=model_ckpt, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
-
-
+    # loop over all images for single primitive rendering
+    for img_id in tqdm(range(len(dataset))):
+        evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, img_idx=img_id, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
 
 """
 # ---------------- 下面画图，是为了看视锥还有mlp的位置，mlp的位置应该在视锥向前延伸范围内 ----------------------

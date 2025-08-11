@@ -1,7 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
 from model import NeuralPrimitiveScene
-from mip360_loader import mip360Dataset
 import os
 import imageio
 import numpy as np
@@ -9,9 +8,7 @@ from tqdm import tqdm
 
 
 @torch.no_grad()
-def evaluate_and_visualize(data_dir, output_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None, loop_all=False):
-    dataset = mip360Dataset(data_dir, split='train')
-    img_idx = 200
+def evaluate_and_visualize(dataset, output_dir, model_ckpt=None, N=1024, img_idx=200, device='cuda', block=False, mlp_idx=None, loop_all=False):
     rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
     height, width = rgbs.shape[:2]
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
@@ -40,11 +37,11 @@ def evaluate_and_visualize(data_dir, output_dir, model_ckpt=None, N=1024, device
     #print("Top 10 largest scales:")
     #print(top10_values)
 
-    # get the index of scales between 0.1 - 10
-    scale_idx = torch.where((scales > 0.1) & (scales < 10))[0]
-    mlp_idx_t = torch.as_tensor(mlp_idx, device=scale_idx.device)
-    mlp_idx = mlp_idx_t[scale_idx.long()]
-    mlp_idx = mlp_idx.tolist()
+    # # get the index of scales between 0.1 - 10
+    # scale_idx = torch.where((scales > 0.1) & (scales < 10))[0]
+    # mlp_idx_t = torch.as_tensor(mlp_idx, device=scale_idx.device)
+    # mlp_idx = mlp_idx_t[scale_idx.long()]
+    # mlp_idx = mlp_idx.tolist()
 
     pred_rgb = []
     batch_size = 100000
@@ -80,4 +77,6 @@ def viz(pred_img, gt_img, mlp_idx, img_idx, scale, output_dir, block=False):
         plt.title(f"PSNR: {psnr:.2f} dB, MLPs: {mlp_idx[0]}-{mlp_idx[-1]}")
         plt.axis('off')
         plt.show()
-    imageio.imwrite(os.path.join(output_dir, f"img_{img_idx}_mlp_{mlp_idx[0]}_{mlp_idx[-1]}_scale_{scale[0].item():.3f}.png"), viz_img)
+    img_dir = os.path.join(output_dir, f"img_{img_idx}")
+    os.makedirs(img_dir, exist_ok=True)
+    imageio.imwrite(os.path.join(img_dir, f"mlp_{mlp_idx[0]}_{mlp_idx[-1]}_scale_{scale[0].item():.3f}.png"), viz_img)

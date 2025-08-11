@@ -18,5 +18,9 @@ density, rgb = MLP(ray_d, dist)
 
 
 # TODO
-[ ] Visualize all MLPs for one image, check every MLP
-[ ] Visualize a single MLP on different images / angles, to check its 3D shape
+
+- [ ] Investigate the MLP primitive that is whole black in all views, check the condition to prune it.
+
+- [x] Visualize all MLPs for one image, check every MLP
+
+- [x] Visualize a single MLP on different images / angles, to check its 3D shape
