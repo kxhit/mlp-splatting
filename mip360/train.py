@@ -1,6 +1,4 @@
 import os
-import uuid
-from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -129,6 +127,7 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
         return init_lr * (1 - alpha) + final_lr * alpha
 
 
+<<<<<<< HEAD
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
     output_root = "/home/yzcheng/Desktop/output/mip360"
@@ -137,6 +136,9 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
+=======
+def train_scene_llff(data_dir, output_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
+>>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
     dataset = mip360Dataset(data_dir)
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
