@@ -159,8 +159,9 @@ class NeuralPrimitiveScene(nn.Module):
 
                 #continue
 
+
             """
-            if scales[i] > 10: #or scales[i] > 200:
+            if scales[i] > 0.005: #or scales[i] > 200:
                 #print(f"Primitive {i} has scale < 0.001, skipping.")
                 rgb_list.append(torch.zeros(B, 3, device=ray_o.device))
                 sigma_list.append(torch.zeros(B, 1, device=ray_o.device))

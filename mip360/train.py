@@ -131,7 +131,7 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
-    output_root = "/home/yuzhou/Desktop/output/mip360"
+    output_root = "/home/yzcheng/Desktop/output/mip360"
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
@@ -144,7 +144,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-1},
-        {"params": scene.positions, "lr": 5e-3},  # 初始设为较小值，保守一些
+        {"params": scene.positions, "lr": 0},  # 初始设为较小值，保守一些
     ], lr=1e-3)
 
 
@@ -260,8 +260,8 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
         
-        # Save at every 1000 epochs
-        if (epoch + 1) % 1000 == 0:
+        # Save at every 2000 epochs
+        if (epoch + 1) % 2000 == 0:
             ckpt_path = os.path.join(output_dir, f"scene_epoch_{epoch+1:05d}.pt")
             torch.save(scene.state_dict(), ckpt_path)
             print(f"[Checkpoint] Saved model to {ckpt_path}")

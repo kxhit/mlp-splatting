@@ -131,7 +131,7 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
 
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
-    output_root = "/home/yuzhou/Desktop/output/mip360"
+    output_root = "/home/yzcheng/Desktop/output/mip360"
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
@@ -144,7 +144,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
 
     # 加载已有 checkpoint 权重
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250729_175040_aad029ac/scene_epoch_62000.pt"
+    model_ckpt_path = "/home/yzcheng/Desktop/output/mip360/20250814_144357_a114d994/scene_epoch_100000.pt"
     if os.path.exists(model_ckpt_path):
         ckpt = torch.load(model_ckpt_path, map_location=device)
         scene.load_state_dict(ckpt)
@@ -402,5 +402,5 @@ if __name__ == "__main__":
     set_seed(2025)
     #torch.set_float32_matmul_precision('high')
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern"
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    train_scene_llff(data_dir, num_epochs=100000, batch_size=4096*3, initial_num_primitives=1024)
+    data_dir = "/home/yzcheng/Desktop/datasets/360_v2/bonsai"
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=4096*2, initial_num_primitives=1024)

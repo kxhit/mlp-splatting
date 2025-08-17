@@ -49,7 +49,7 @@ from utils.read_write_model import read_images_binary, read_cameras_binary, read
 
 
 class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=8, llffhold=8, split='train'):
+    def __init__(self, basedir, factor=2, llffhold=8, split='train'):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
         self.llffhold = llffhold
@@ -118,7 +118,10 @@ class mip360Dataset(Dataset):
         # === 原封不动保留其余部分 ===
 
         # 读取图片
-        image_dir = os.path.join(self.basedir, f"images_{factor}")
+        if factor == 1:
+            image_dir = os.path.join(self.basedir, f"images")
+        else:
+            image_dir = os.path.join(self.basedir, f"images_{factor}")
         self.image_paths = sorted([
             os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('JPG', 'jpg', 'png'))
         ])
