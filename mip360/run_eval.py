@@ -36,26 +36,13 @@ def strip_orig_mod_prefix(state_dict):
     return new_state_dict
 
 if __name__ == "__main__":
-<<<<<<< HEAD
     # Change to your scene path
-    data_dir = "/home/yzcheng/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yzcheng/Desktop/output/mip360/20250814_144357_a114d994/scene_epoch_100000.pt"
+    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/222/scene_epoch_56000.pt"
 
-=======
-    # TODO Change to your scene path
-    # data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    # model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250731_215818_67f2c929/scene_epoch_80000.pt"
-    data_dir = "/home/xin/data/mipnerf360/bonsai"
-    model_ckpt_path = "scene_epoch_62000.pt"
-
-    output_root = "./logs/"
-    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
-    output_dir = os.path.join(output_root, random_tag)
-    os.makedirs(output_dir, exist_ok=True)
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
 
-    dataset = mip360Dataset(data_dir, split='train')
+    dataset = mip360Dataset(data_dir, split='test')
 
     
     # ✅ 处理 key 前缀
@@ -63,7 +50,6 @@ if __name__ == "__main__":
         model_ckpt = strip_orig_mod_prefix(model_ckpt)
 
     # 可修改为 list(range(N)) 以渲染所有 MLPs
-<<<<<<< HEAD
     mlp_idx = list(range(312, 323))  
     mlp_idx = None
 
@@ -71,20 +57,6 @@ if __name__ == "__main__":
     evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
 
 
-=======
-    # mlp_idx = list(range(894, 895))
-    mlp_idx = list(range(1024))
-
-    # # 如果训练时是 N=1024 个 primitive，那这里也得一致
-    # evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
-    #
-    # # loop over all primitives and save each rendered image
-    # evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
-
-    # loop over all images for single primitive rendering
-    for img_id in tqdm(range(len(dataset))):
-        evaluate_and_visualize(dataset, output_dir, model_ckpt=model_ckpt, img_idx=img_id, block=False, mlp_idx=mlp_idx, N=1024, loop_all=True)
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
 
 """
 # ---------------- 下面画图，是为了看视锥还有mlp的位置，mlp的位置应该在视锥向前延伸范围内 ----------------------

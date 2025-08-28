@@ -127,31 +127,35 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
         return init_lr * (1 - alpha) + final_lr * alpha
 
 
-<<<<<<< HEAD
 def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
-    output_root = "/home/yzcheng/Desktop/output/mip360"
+    output_root = "/home/yuzhou/Desktop/output/mip360"
     os.makedirs(output_root, exist_ok=True)
-    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    random_tag = "222"
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
-=======
-def train_scene_llff(data_dir, output_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
     dataset = mip360Dataset(data_dir)
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
+
+    # 加载已有 checkpoint 权重
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/111//scene_epoch_100000.pt"
+    if os.path.exists(model_ckpt_path):
+        ckpt = torch.load(model_ckpt_path, map_location=device)
+        scene.load_state_dict(ckpt)
+        print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
+
+
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 1e-1},
+        {"params": scene.log_scales, "lr": 0},
         {"params": scene.positions, "lr": 0},  # 初始设为较小值，保守一些
     ], lr=1e-3)
 
 
     #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
-
 
     ckpt_path = os.path.join(output_dir, f"scene_epoch_0.pt")
     torch.save(scene.state_dict(), ckpt_path)
@@ -173,9 +177,6 @@ def train_scene_llff(data_dir, output_dir, num_epochs=10, batch_size=4096, lr=1e
     """
 
     rays_o_all, rays_d_all, rgbs_all = dataset.get_all_rays(device=None)
-    rays_o_all = rays_o_all.pin_memory()
-    rays_d_all = rays_d_all.pin_memory()
-    rgbs_all   = rgbs_all.pin_memory()
 
     N = rays_o_all.shape[0]
     assert batch_size <= N, "Batch size must be less than or equal to the number of rays."

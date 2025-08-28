@@ -9,14 +9,10 @@ from tqdm import tqdm
 
 """
 @torch.no_grad()
-<<<<<<< HEAD
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
     dataset = mip360Dataset(data_dir, split='train')
     img_idx = 150
-=======
-def evaluate_and_visualize(dataset, output_dir, model_ckpt=None, N=1024, img_idx=200, device='cuda', block=False, mlp_idx=None, loop_all=False):
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
     rays_o, rays_d, rgbs = dataset[img_idx]  # pick first image for evaluation
     height, width = rgbs.shape[:2]
     rays_o = rays_o.to(device).view(-1, 3)  # [H*W, 3]
@@ -52,33 +48,12 @@ def evaluate_and_visualize(dataset, output_dir, model_ckpt=None, N=1024, img_idx
     # mlp_idx = mlp_idx.tolist()
 
     pred_rgb = []
-<<<<<<< HEAD
     batch_size = 50000
     #batch_size = rays_o.shape[0]
     for i in range(0, rays_o.shape[0], batch_size):
         pred_rgb.append(scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]))
     print('invalid num ', scene.invalid_nums)
     pred_rgb = torch.cat(pred_rgb, dim=0)
-=======
-    batch_size = 100000
-    if loop_all:    # loop over each mlp id individually
-        for mlp_id in tqdm(mlp_idx):
-            pred_rgb = []
-            for i in range(0, rays_o.shape[0], batch_size):
-                pred_rgb.append(scene(rays_o[i:i + batch_size], rays_d[i:i + batch_size], [mlp_id]))    # model forward can take chosen mlp_idx
-            pred_rgb = torch.cat(pred_rgb, dim=0)
-            pred_img = pred_rgb.view(1, height, width, 3).clamp(0, 1).cpu()
-            gt_img = gt_rgb.view(1, height, width, 3).cpu()
-            viz(pred_img, gt_img, [mlp_id], img_idx, scales[mlp_id], output_dir, block=block)
-    else:   # infer the list of mlp_idx together
-        for i in range(0, rays_o.shape[0], batch_size):
-            pred_rgb.append(scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size], mlp_idx))
-        print('invalid num ', scene.invalid_nums)
-        pred_rgb = torch.cat(pred_rgb, dim=0)
-        pred_img = pred_rgb.view(1, height, width, 3).clamp(0, 1).cpu()
-        gt_img = gt_rgb.view(1, height, width, 3).cpu()
-        viz(pred_img, gt_img, mlp_idx, img_idx, scales, output_dir, block=block)
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
 
 
 def viz(pred_img, gt_img, mlp_idx, img_idx, scale, output_dir, block=False):
@@ -144,11 +119,11 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         # Debug scales
         scales = torch.exp(scene.log_scales)
         print('scene scales ', scales)
-        print('Number of scales > 5:', (scales > 5).sum().item())
-        print('Number of scales < 0.005:', (scales < 0.005).sum().item())
+        print('Number of scales > 1:', (scales > 1).sum().item())
+        print('Number of scales < 0.001:', (scales < 0.001).sum().item())
 
         # ---------------- Predict in batches ----------------
-        batch_size = 50000
+        batch_size = 100000
         pred_rgb_chunks = []
         for i in range(0, rays_o.shape[0], batch_size):
             chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
@@ -162,8 +137,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         print('invalid num ', scene.invalid_nums)
 
         # ---------------- Reshape & compute PSNR ----------------
-        pred_img = pred_rgb.view(1, 260, 390, 3).clamp(0, 1)
-        gt_img = gt_rgb.cpu().view(1, 260, 390, 3)
+        pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
+        gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
         psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
 
         # ---------------- Visualization ----------------
@@ -192,8 +167,3 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         torch.cuda.empty_cache()
 
     print("Average PSNR:", total / 37)
-=======
-    img_dir = os.path.join(output_dir, f"img_{img_idx}")
-    os.makedirs(img_dir, exist_ok=True)
-    imageio.imwrite(os.path.join(img_dir, f"mlp_{mlp_idx[0]}_{mlp_idx[-1]}_scale_{scale[0].item():.3f}.png"), viz_img)
->>>>>>> 8cc65eef06208a75988afbfce503d9d1b23a9363
