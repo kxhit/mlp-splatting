@@ -86,20 +86,20 @@ import torch
 import matplotlib.pyplot as plt
 import gc
 from model import NeuralPrimitiveScene
-from mip360_loader import mip360Dataset
+from synthetic_loader import SyntheticDataset
 
 fig = None
 ax0_img = None
 ax1_img = None
 
 @torch.no_grad()
-def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
+def evaluate_and_visualize(data_dir, scene_name, model_ckpt=None, N=1024, device='cuda', split="test", mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = SyntheticDataset(scene_name, split=split)
 
     total = 0.0
 
-    for img_idx in range(37):
+    for img_idx in range(300):
         # ---------------- Load data ----------------
         rays_o, rays_d, rgbs = dataset[img_idx]
         rays_o = rays_o.to(device).view(-1, 3)
@@ -137,8 +137,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         print('invalid num ', scene.invalid_nums)
 
         # ---------------- Reshape & compute PSNR ----------------
-        pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
-        gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
+        pred_img = pred_rgb.view(1, 800, 800, 3).clamp(0, 1)
+        gt_img = gt_rgb.cpu().view(1, 800, 800, 3)
         psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
 
         # ---------------- Visualization ----------------
@@ -166,4 +166,4 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         gc.collect()
         torch.cuda.empty_cache()
 
-    print("Average PSNR:", total / 37)
+    print("Average PSNR:", total / 300)

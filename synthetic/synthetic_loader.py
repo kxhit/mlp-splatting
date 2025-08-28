@@ -48,17 +48,17 @@ from utils.read_write_model import read_images_binary, read_cameras_binary, read
 #         return rays_o, rays_d
 
 
-class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=2, llffhold=8, split='train'):
+class SyntheticDataset(Dataset):
+    def __init__(self, basedir, scene_name, split='train'):
         self.basedir = basedir
+        self.scene_name = scene_name
         self.transform = transforms.ToTensor()
-        self.llffhold = llffhold
         self.split = split
-        self._load_meta(factor)
+        self._load_meta(scene_name)
 
-    def _load_meta(self, factor):
+    def _load_meta(self, scene_name):
         # === 修改部分：从 COLMAP 读取 pose ===
-        colmap_dir = os.path.join(self.basedir, "sparse/0")
+        colmap_dir = os.path.join(self.basedir, f"nerf_synthetic_colmap/{scene_name}/colmap_results/triangulated")
         images = read_images_binary(os.path.join(colmap_dir, "images.bin"))
         cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
@@ -114,44 +114,21 @@ class mip360Dataset(Dataset):
 
         self.positions = torch.from_numpy(all_xyz).float()  # shape: (M, 3)
 
-
-        # === 原封不动保留其余部分 ===
-
         # 读取图片
-        if factor == 1:
-            image_dir = os.path.join(self.basedir, f"images")
-        else:
-            image_dir = os.path.join(self.basedir, f"images_{factor}")
+        image_dir = os.path.join(self.basedir, f"nerf_synthetic/{scene_name}/train")
         self.image_paths = sorted([
             os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('JPG', 'jpg', 'png'))
         ])
         self.images = [self.transform(imageio.imread(p)) for p in self.image_paths]
         self.images = torch.stack(self.images)
 
+
         # 保存归一化参数用于后续处理
         self.scale = scale
         self.avg_position = avg_position
 
         # 计算焦距（从 hwf 获取）
-        self.focal = hwf[0, 2] / factor  # 根据下采样因子调整焦距
-
-
-        # === 按 llffhold 做 train/test 划分 ===
-        num_images = self.images.shape[0]
-        i_test = np.arange(num_images)[::self.llffhold]
-        i_train = np.array([i for i in range(num_images) if i not in i_test])
-
-
-        if self.split == 'train':
-            select_ids = i_train
-        elif self.split == 'test':
-            select_ids = i_test
-        else:
-            raise ValueError(f"Unknown split type: {self.split}")
-
-        # Apply split
-        self.images = self.images[select_ids]
-        self.poses = self.poses[select_ids]
+        self.focal = hwf[0, 2] 
 
         print(f"Loaded {len(self.images)} images from {image_dir}")
 
@@ -185,27 +162,38 @@ class mip360Dataset(Dataset):
 
     def get_all_rays(self, device=None, return_img_ids=False):
         """
-        默认放在 CPU；只有当你显式传入 device（如 'cuda'）时才会搬过去。
+        默认放在 CPU; 只有当你显式传入 device (如 'cuda'）时才会搬过去。
         """
         rays_o_list, rays_d_list, rgbs_list = [], [], []
         img_id_list = [] if return_img_ids else None
 
         for i in range(len(self.images)):
-            img  = self.images[i]                 # (3, H, W)
+            img  = self.images[i]                 # (4, H, W)
             pose = self.poses[i]                  # (3, 4)
             H, W = img.shape[1:]
 
+            # === 获取 alpha mask ===
+            # alpha 通道在最后一个通道
+            alpha = img[3, :, :]                 # (H, W)
+            mask = alpha > 0                     # True = 不透明, False = 透明
+
+            # === 获取所有射线 ===
             rays_o, rays_d = self._get_rays((H, W), pose)  # (H, W, 3)
-            rays_o = rays_o.reshape(-1, 3)
-            rays_d = rays_d.reshape(-1, 3)
-            rgbs   = img.permute(1, 2, 0).reshape(-1, 3)
+
+            # === 筛选不透明像素 ===
+            rays_o = rays_o[mask]               # (N, 3)
+            rays_d = rays_d[mask]               # (N, 3)
+
+            # === 提取 RGB 值，并用 mask 筛选 ===
+            rgbs = img[:3].permute(1, 2, 0)     # (H, W, 3)
+            rgbs = rgbs[mask]                   # (N, 3)
 
             rays_o_list.append(rays_o)
             rays_d_list.append(rays_d)
             rgbs_list.append(rgbs)
 
             if return_img_ids:
-                img_id_list.append(torch.full((H * W,), i, dtype=torch.long))
+                img_id_list.append(torch.full((mask.sum(),), i, dtype=torch.long))
 
         rays_o = torch.cat(rays_o_list, dim=0)
         rays_d = torch.cat(rays_d_list, dim=0)

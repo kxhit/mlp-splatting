@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 from model import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
-from mip360_loader import mip360Dataset
+from synthetic_loader import SyntheticDataset
 from tqdm import tqdm
 from save_model import save_model
 from visualize import evaluate_and_visualize

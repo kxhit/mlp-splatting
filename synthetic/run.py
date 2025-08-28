@@ -1,4 +1,4 @@
-from train import train_scene_llff
+from train import train_scene_nerf_synthetic
 import torch
 import numpy as np
 import random
@@ -19,5 +19,6 @@ if __name__ == "__main__":
     set_seed(2025)
     #torch.set_float32_matmul_precision('high')
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern"
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    train_scene_llff(data_dir, num_epochs=100000, batch_size=15000, initial_num_primitives=1024)
+    data_dir = "/home/yuzhou/Desktop/datasets/nerf_synthetic"
+    scene_name = "lego"
+    train_scene_nerf_synthetic(data_dir, scene_name=scene_name, num_epochs=200000, batch_size=15000, initial_num_primitives=1024)

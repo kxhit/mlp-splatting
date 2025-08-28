@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 import uuid
 from tqdm import tqdm
-from mip360_loader import mip360Dataset
+from synthetic_loader import SyntheticDataset
 
  
 """
@@ -42,7 +42,7 @@ if __name__ == "__main__":
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
 
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = SyntheticDataset(data_dir, split='test')
 
     
     # ✅ 处理 key 前缀

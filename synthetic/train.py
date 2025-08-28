@@ -1,4 +1,6 @@
 import os
+import uuid
+from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -7,7 +9,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
 from model import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
-from mip360_loader import mip360Dataset
+from synthetic_loader import SyntheticDataset
 from tqdm import tqdm
 from save_model import save_model
 from visualize import evaluate_and_visualize
@@ -16,59 +18,6 @@ from visualize import evaluate_and_visualize
 import copy
 from utils.loss_utils import ssim
 
-
-
-"""
-def primitive_consistency_loss(model, ray_o, ray_d, eps=1e-3):
-    B = ray_o.shape[0]
-    N = model.num_primitives
-
-    ray_d = F.normalize(ray_d, dim=-1)
-    noise = torch.randn_like(ray_o) * eps
-    ray_o_perturbed = ray_o + noise
-
-    ray_o_expand = ray_o.unsqueeze(0).expand(N, B, 3)
-    ray_o_perturbed_expand = ray_o_perturbed.unsqueeze(0).expand(N, B, 3)
-    ray_d_expand = ray_d.unsqueeze(0).expand(N, B, 3)
-    center_expand = model.positions[:, None, :].expand(N, B, 3)
-
-    # 原始投影距离
-    vec = center_expand - ray_o_expand
-    t = torch.sum(vec * ray_d_expand, dim=-1, keepdim=True)
-    proj = ray_o_expand + t * ray_d_expand
-    dist = center_expand - proj  # (N, B, 3)
-
-    # 偏移后的投影距离
-    vec2 = center_expand - ray_o_perturbed_expand
-    t2 = torch.sum(vec2 * ray_d_expand, dim=-1, keepdim=True)
-    proj2 = ray_o_perturbed_expand + t2 * ray_d_expand
-    dist2 = center_expand - proj2  # (N, B, 3)
-
-    loss_total = 0.0
-    count = 0
-
-    for i in range(N):
-        norm = torch.norm(dist[i], dim=-1, keepdim=True)
-        mask = norm <= 5 * model.scales[i]  # (B, 1)
-
-        if not mask.any():
-            continue
-
-        out1 = model.mlps[i](ray_d, dist[i])  # (B, 4)
-        out2 = model.mlps[i](ray_d, dist2[i])  # (B, 4)
-
-        rgb1 = out1[..., :3]
-        rgb2 = out2[..., :3]
-
-        diff = F.mse_loss(rgb1[mask.squeeze(-1)], rgb2[mask.squeeze(-1)])
-        loss_total += diff
-        count += 1
-
-    if count == 0:
-        return torch.tensor(0.0, device=ray_o.device)
-    else:
-        return loss_total / count
-"""
 
 
 def sample_patch_rays(rays_o, rays_d, rgbs, num_patches_h=4, num_patches_w=4):
@@ -127,30 +76,22 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
         return init_lr * (1 - alpha) + final_lr * alpha
 
 
-def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
+def train_scene_nerf_synthetic(data_dir, scene_name, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
     # Set saving directory
-    output_root = "/home/yuzhou/Desktop/output/mip360"
+    output_root = "/home/yuzhou/Desktop/output/nerf_synthetic"
     os.makedirs(output_root, exist_ok=True)
-    random_tag = "222"
+    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
-    dataset = mip360Dataset(data_dir)
+    dataset = SyntheticDataset(data_dir, scene_name)
     scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
-    # 加载已有 checkpoint 权重
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/111//scene_epoch_100000.pt"
-    if os.path.exists(model_ckpt_path):
-        ckpt = torch.load(model_ckpt_path, map_location=device)
-        scene.load_state_dict(ckpt)
-        print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
-
-
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 0},
+        {"params": scene.log_scales, "lr": 1e-1},
         {"params": scene.positions, "lr": 0},  # 初始设为较小值，保守一些
     ], lr=1e-3)
 
@@ -200,29 +141,12 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         idx = perm[ptr:ptr + batch_size]
         ptr += batch_size
 
-        
+        # 采样 patch rays
         rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
         rays_d_batch = rays_d_all[idx].to(device, non_blocking=True)
         rgbs_batch   = rgbs_all[idx].to(device, non_blocking=True)
 
-
-        """
-        if epoch % 500 < 500:
-            # 使用随机采样 rays
-            rays_o = rays_o.reshape(-1, 3)
-            rays_d = rays_d.reshape(-1, 3)
-            rgbs = rgbs.reshape(-1, 3)
-            rand_idx = torch.randperm(rays_o.size(0))[:batch_size]
-            rays_o_batch = rays_o[rand_idx]
-            rays_d_batch = rays_d[rand_idx]
-            rgbs_batch = rgbs[rand_idx]
-        else:
-            rays_o_batch, rays_d_batch, rgbs_batch = sample_patch_rays(
-                        rays_o, rays_d, rgbs,
-                        num_patches_h=4, num_patches_w=4  # 纵向4块，横向4块
-                    )  
-        """
-
+        # 训练一步
         optimizer.zero_grad()                       # 1. 清梯度
         pred = scene(rays_o_batch, rays_d_batch)    # 2. 前向
         loss = F.mse_loss(pred, rgbs_batch)         # 3. 计算 loss
