@@ -37,12 +37,13 @@ def strip_orig_mod_prefix(state_dict):
 
 if __name__ == "__main__":
     # Change to your scene path
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/222/scene_epoch_56000.pt"
+    data_dir = "/home/yuzhou/Desktop/datasets/nerf_synthetic"
+    scene_name = "lego"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/nerf_synthetic/20250828_204243_24e25a34/scene_epoch_42000.pt"
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
 
-    dataset = SyntheticDataset(data_dir, split='test')
+    dataset = SyntheticDataset(data_dir, scene_name=scene_name, split='train')
 
     
     # ✅ 处理 key 前缀

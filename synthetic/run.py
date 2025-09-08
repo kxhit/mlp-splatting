@@ -21,4 +21,4 @@ if __name__ == "__main__":
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern"
     data_dir = "/home/yuzhou/Desktop/datasets/nerf_synthetic"
     scene_name = "lego"
-    train_scene_nerf_synthetic(data_dir, scene_name=scene_name, num_epochs=200000, batch_size=15000, initial_num_primitives=1024)
+    train_scene_nerf_synthetic(data_dir, scene_name=scene_name, num_epochs=100000, batch_size=15000, initial_num_primitives=1024)

@@ -202,7 +202,7 @@ class SyntheticDataset(Dataset):
         if return_img_ids:
             img_ids = torch.cat(img_id_list, dim=0)
 
-        # 只有当你想放到 GPU 时才传 device
+        # 只有当想放到 GPU 时才传 device
         if device is not None:
             rays_o = rays_o.to(device, non_blocking=True)
             rays_d = rays_d.to(device, non_blocking=True)
