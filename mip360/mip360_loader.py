@@ -49,7 +49,7 @@ from utils.read_write_model import read_images_binary, read_cameras_binary, read
 
 
 class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=2, llffhold=8, split='train'):
+    def __init__(self, basedir, factor=8, llffhold=8, split='train'):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
         self.llffhold = llffhold
@@ -111,6 +111,7 @@ class mip360Dataset(Dataset):
         # === 同样归一化（平移 + 缩放）===
         all_xyz -= avg_position
         all_xyz *= scale
+
 
         self.positions = torch.from_numpy(all_xyz).float()  # shape: (M, 3)
 

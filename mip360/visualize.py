@@ -95,11 +95,11 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = mip360Dataset(data_dir, split='train')
 
     total = 0.0
 
-    for img_idx in range(37):
+    for img_idx in range(len(dataset)):
         # ---------------- Load data ----------------
         rays_o, rays_d, rgbs = dataset[img_idx]
         rays_o = rays_o.to(device).view(-1, 3)
@@ -137,8 +137,11 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         print('invalid num ', scene.invalid_nums)
 
         # ---------------- Reshape & compute PSNR ----------------
-        pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
-        gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
+        #pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
+        #gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
+
+        pred_img = pred_rgb.view(1, 260, 390, 3).clamp(0, 1)
+        gt_img = gt_rgb.cpu().view(1, 260, 390, 3)
         psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
 
         # ---------------- Visualization ----------------

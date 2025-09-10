@@ -1,4 +1,6 @@
 import os
+import uuid
+from datetime import datetime
 
 import torch
 import torch.nn.functional as F
@@ -15,6 +17,8 @@ from visualize import evaluate_and_visualize
 
 import copy
 from utils.loss_utils import ssim
+import wandb
+USE_WANDB = False
 
 
 
@@ -131,7 +135,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     # Set saving directory
     output_root = "/home/yuzhou/Desktop/output/mip360"
     os.makedirs(output_root, exist_ok=True)
-    random_tag = "222"
+    random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -140,13 +144,14 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
+    """
     # 加载已有 checkpoint 权重
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/111//scene_epoch_100000.pt"
     if os.path.exists(model_ckpt_path):
         ckpt = torch.load(model_ckpt_path, map_location=device)
         scene.load_state_dict(ckpt)
         print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
-
+    """
 
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3

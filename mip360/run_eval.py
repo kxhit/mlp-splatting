@@ -38,11 +38,9 @@ def strip_orig_mod_prefix(state_dict):
 if __name__ == "__main__":
     # Change to your scene path
     data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/222/scene_epoch_56000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/1021-octree/scene_epoch_100000.pt"
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
-
-    dataset = mip360Dataset(data_dir, split='test')
 
     
     # ✅ 处理 key 前缀
@@ -54,7 +52,7 @@ if __name__ == "__main__":
     mlp_idx = None
 
     # 如果训练时是 N=1024 个 primitive，那这里也得一致
-    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1024)
+    evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1021)
 
 
 
