@@ -38,7 +38,7 @@ def strip_orig_mod_prefix(state_dict):
 if __name__ == "__main__":
     # Change to your scene path
     data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/1021-octree/scene_epoch_100000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250910_155431_654263ab/scene_epoch_100000.pt"
 
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
 
@@ -50,6 +50,17 @@ if __name__ == "__main__":
     # 可修改为 list(range(N)) 以渲染所有 MLPs
     mlp_idx = list(range(312, 323))  
     mlp_idx = None
+
+    """
+    print(model_ckpt.keys())  # 看看里面有没有 meta 信息
+
+    # 看某个具体参数的 shape
+    print("freq_bands shape:", model_ckpt["mlps.0.encoder.freq_bands"].shape)
+    print("net.0.weight shape:", model_ckpt["mlps.0.net.0.weight"].shape)
+    print("net.0.bias shape:", model_ckpt["mlps.0.net.0.bias"].shape)
+    """
+
+
 
     # 如果训练时是 N=1024 个 primitive，那这里也得一致
     evaluate_and_visualize(data_dir, model_ckpt=model_ckpt, block=True, mlp_idx=mlp_idx, N=1021)

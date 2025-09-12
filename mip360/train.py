@@ -140,7 +140,12 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     os.makedirs(output_dir, exist_ok=True)
 
     dataset = mip360Dataset(data_dir)
-    scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, initial_positions=dataset.positions).to(device)
+
+    """
+    test on how to oganize parameters is suitable
+    """
+    scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, hidden_dim=26, pe_frequencies=6, 
+                                 initial_positions=dataset.positions).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
