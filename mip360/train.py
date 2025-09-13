@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import StepLR
-from model import NeuralPrimitiveScene
+from vmodel import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
 from mip360_loader import mip360Dataset
 from tqdm import tqdm
@@ -18,7 +18,7 @@ from visualize import evaluate_and_visualize
 import copy
 from utils.loss_utils import ssim
 import wandb
-USE_WANDB = False
+USE_WANDB = True
 
 
 
@@ -172,9 +172,23 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     print(f"[Checkpoint] Saved model to {ckpt_path}")
 
 
+    if USE_WANDB:
+        wandb.init(
+            project="mlp-splatting",
+            name=f"mip360_run_{random_tag}",
+            config={
+                "num_epochs": num_epochs,
+                "batch_size": batch_size,
+                "lr": lr,
+                "num_primitives": initial_num_primitives,
+                "hidden_dim": 26,
+                "pe_frequencies": 6,
+                "num_layers": 1,   # 当前是单隐藏层，如果以后改成两层可以记录成2
+            }
+        )
+
     loss_accum = 0.0
     loss_count = 0
-
 
     """
     #加载check point继续训练
@@ -256,9 +270,12 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
             print(f"[Epoch {epoch+1}] avg {loss_count} loss : {avg_loss:.6f}")
             loss_accum = 0.0
             loss_count = 0
+            if USE_WANDB:
+                wandb.log({"avg_loss": avg_loss, "epoch": epoch + 1})
+            loss_accum = 0.0
+            loss_count = 0
 
         # TODO wandb
-
 
         # Prune & densify primitives
         if epoch % 500 == 0 and epoch > 500:

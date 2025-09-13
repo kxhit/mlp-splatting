@@ -1,108 +1,184 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
+from utils.sampling import octree_sample
 
-from torch.func import vmap, functional_call
+
+class IntegratedPositionalEncoding(nn.Module):
+    def __init__(self, in_dim=4, num_frequencies=10, sigma=0.01):
+        super().__init__()
+        self.in_dim = in_dim
+        self.num_frequencies = num_frequencies
+        self.sigma2 = sigma ** 2
+        freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies) * torch.pi
+        self.register_buffer("freq_bands", freq_bands)
+
+    def forward(self, x):
+        x_proj = x[..., None] * self.freq_bands
+        attenuation = torch.exp(-0.5 * (self.freq_bands ** 2) * self.sigma2)
+        x_proj = x_proj * attenuation
+        x_proj = x_proj.view(*x.shape[:-1], -1)
+        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
+    @property
+    def out_dim(self):
+        return self.in_dim * self.num_frequencies * 2
+
 
 class FourierFeatureEncoding(nn.Module):
     def __init__(self, in_dim=4, num_frequencies=10):
         super().__init__()
-        self.freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies)
+        self.in_dim = in_dim
+        self.num_frequencies = num_frequencies
+        freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies)
+        self.register_buffer("freq_bands", freq_bands)
 
     def forward(self, x):
-        x_proj = x[..., None] * self.freq_bands.to(x.device)
+        x_proj = x[..., None] * self.freq_bands
         x_proj = x_proj.view(*x.shape[:-1], -1)
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
-class PrimitiveMLP(nn.Module):
-    def __init__(self, input_dim=6, hidden_dim=64, num_frequencies=10):
-        super().__init__()
-        self.encoder = FourierFeatureEncoding(input_dim, num_frequencies)
-        self.net = nn.Sequential(
-            nn.Linear(input_dim * num_frequencies * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 4)  # RGB + density
-        )
+    @property
+    def out_dim(self):
+        return self.in_dim * self.num_frequencies * 2
 
-    def forward(self, ray_d, dist):
-        x = torch.cat([ray_d, dist], dim=-1)
-        x_encoded = self.encoder(x)
-        raw_out = self.net(x_encoded)
-        rgb = torch.sigmoid(raw_out[..., :3])  # [0, 1]
-        sigma = F.softplus(raw_out[..., 3:])  # >= 0
-        # # make sigma binary, 0 or 1
-        # sigma = F.sigmoid(raw_out[..., 3:])
-        # sigma = (sigma > 0.5).float()  # Binary sigma
-        return torch.cat([rgb, sigma], dim=-1)
 
-class NeuralPrimitiveScene(nn.Module):
-    def __init__(self, num_primitives=2, hidden_dim=64, pe_frequencies=6):
+class BatchedPrimitiveMLP(nn.Module):
+    def __init__(self, num_primitives, input_dim=6, hidden_dim=16, num_frequencies=10, use_integrated_pe=True):
         super().__init__()
         self.num_primitives = num_primitives
-        bound = 1.0
-        self.positions = nn.Parameter(torch.rand(num_primitives, 3) * 2 * bound - bound)
-        self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.5)
+        if use_integrated_pe:
+            self.encoder = IntegratedPositionalEncoding(input_dim, num_frequencies)
+        else:
+            self.encoder = FourierFeatureEncoding(input_dim, num_frequencies)
 
-        template = PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
-        self.shared_model = template
-        self.buffer_dict = dict(template.named_buffers())
+        # use encoder.out_dim directly
+        self.encoded_dim = self.encoder.out_dim
+        self.hidden_dim = hidden_dim
 
-        # Per-primitive parameters
-        self.param_keys = list(dict(template.named_parameters()).keys())
-        self.primitive_params = nn.ParameterDict()
-        for key in self.param_keys:
-            safe_key = key.replace('.', '_')
-            param_tensor = torch.stack([dict(template.named_parameters())[key].clone()
-                                        for _ in range(num_primitives)])
-            self.primitive_params[safe_key] = nn.Parameter(param_tensor)
-        self.reverse_map = {k.replace('.', '_'): k for k in self.param_keys}
+        self.W1 = nn.Parameter(torch.empty(num_primitives, hidden_dim, self.encoded_dim))
+        self.b1 = nn.Parameter(torch.empty(num_primitives, hidden_dim))
+        self.W2 = nn.Parameter(torch.empty(num_primitives, 4, hidden_dim))
+        self.b2 = nn.Parameter(torch.empty(num_primitives, 4))
+        self.reset_parameters()
 
-    def forward(self, ray_o, ray_d):
+
+    def reset_parameters(self):
+        nn.init.kaiming_uniform_(self.W1, a=math.sqrt(5))
+        fan_in = self.W1.size(2)
+        bound = 1 / math.sqrt(fan_in)
+        nn.init.uniform_(self.b1, -bound, bound)
+
+        nn.init.xavier_uniform_(self.W2)
+        fan_in2 = self.W2.size(2)
+        bound2 = 1 / math.sqrt(fan_in2)
+        nn.init.uniform_(self.b2, -bound2, bound2)
+
+
+    def forward(self, ray_d, dist, idx=None):
+        B = ray_d.shape[0]
+        if idx is None:
+            W1, b1, W2, b2 = self.W1, self.b1, self.W2, self.b2
+            M = self.num_primitives
+        else:
+            W1 = self.W1.index_select(0, idx)
+            b1 = self.b1.index_select(0, idx)
+            W2 = self.W2.index_select(0, idx)
+            b2 = self.b2.index_select(0, idx)
+            M = idx.shape[0]
+
+        ray_d_mb = ray_d.unsqueeze(0).expand(M, B, 3)
+        x = torch.cat([ray_d_mb, dist], dim=-1)           # (M,B,6)
+        x_enc = self.encoder(x)                           # (M,B,encoded_dim)
+
+        h = torch.einsum('mbd,mhd->mbh', x_enc, W1) + b1.unsqueeze(1)   # (M,B,H)
+        h = F.relu(h)
+        out = torch.einsum('mbh,moh->mbo', h, W2) + b2.unsqueeze(1)     # (M,B,4)
+
+        rgb = torch.sigmoid(out[..., :3])   # (M,B,3)
+        sigma = F.softplus(out[..., 3:4])   # (M,B,1)
+        return rgb, sigma
+
+
+class NeuralPrimitiveScene(nn.Module):
+    def __init__(self, num_primitives=1024, hidden_dim=16, pe_frequencies=10, topk=128, initial_positions=None):
+        super().__init__()
+        self.num_primitives = num_primitives
+        if initial_positions is None:
+            bound = 1.0
+            self.positions = nn.Parameter(torch.rand(num_primitives, 3) * 2 * bound - bound)
+            sampled_scales = torch.ones(num_primitives) * 0.1
+        else:
+            sampled_positions, sampled_scales = octree_sample(initial_positions)
+            sampled_scales /= 10
+            self.positions = nn.Parameter(sampled_positions.clone().detach())
+
+        self.log_scales = nn.Parameter(torch.log(sampled_scales).unsqueeze(-1))
+        self.mlps = BatchedPrimitiveMLP(
+            num_primitives=num_primitives,
+            input_dim=6,
+            hidden_dim=hidden_dim,
+            num_frequencies=pe_frequencies,
+            use_integrated_pe=True,
+        )
+
+        self.register_buffer("alpha_accum", torch.zeros(num_primitives))
+        self.register_buffer("occupancy_accum", torch.zeros(num_primitives))
+        self.invalid_nums = 0
+        self.topk = topk
+
+    def forward(self, ray_o, ray_d, mlp_id=None):
+        self.invalid_nums = 0
         B = ray_o.shape[0]
         N = self.num_primitives
+        device = ray_o.device
+        ray_d = F.normalize(ray_d, dim=-1)
 
-        # Expand rays and primitives
-        ray_o_exp = ray_o.unsqueeze(0).expand(N, B, 3)
-        ray_d_exp = F.normalize(ray_d.unsqueeze(0).expand(N, B, 3), dim=-1)
-        pos_exp = self.positions[:, None, :].expand(N, B, 3)
+        ray_o_nb = ray_o.unsqueeze(0).expand(N, B, 3)
+        ray_d_nb = ray_d.unsqueeze(0).expand(N, B, 3)
+        centers = self.positions[:, None, :].expand(N, B, 3)
 
-        vec = pos_exp - ray_o_exp
-        t = torch.sum(vec * ray_d_exp, dim=-1, keepdim=True)
-        proj = ray_o_exp + t * ray_d_exp
-        dist_vec = pos_exp - proj
-        dist_norm = torch.norm(dist_vec, dim=-1)  # (N, B)
+        vec = centers - ray_o_nb
+        t = torch.sum(vec * ray_d_nb, dim=-1, keepdim=True)
+        proj = ray_o_nb + t * ray_d_nb
+        vec_perp = centers - proj
 
-        mask = dist_norm <= self.scales.view(-1, 1)  # (N, B)
-        ray_idx, prim_idx = torch.nonzero(mask, as_tuple=True)
+        scales = torch.exp(self.log_scales)
 
-        # Select sparse inputs
-        ray_d_sparse = ray_d[ray_idx]
-        dist_sparse = dist_vec[prim_idx, ray_idx]
+        if mlp_id is None:
+            mlp_id = torch.arange(N, device=device)
+        M = mlp_id.shape[0]
 
-        # Batched per-primitive parameters
-        param_map = prim_idx
-        param_dict = {
-            self.reverse_map[k]: self.primitive_params[k][param_map]
-            for k in self.reverse_map
-        }
+        dist = vec_perp.index_select(0, mlp_id)       # (M,B,3)
+        t_sel = t.index_select(0, mlp_id).squeeze(-1) # (M,B)
+        scales_sel = scales.index_select(0, mlp_id)   # (M,1)
 
-        def fwd(params, ray_d_i, dist_i):
-            return functional_call(self.shared_model, (params, self.buffer_dict), (ray_d_i, dist_i))
+        norm = torch.norm(dist, dim=-1, keepdim=True) # (M,B,1)
+        # mask = norm <= scales_sel.unsqueeze(1)      # (M,B,1)  # 暂时不用
 
-        out = vmap(fwd)(param_dict, ray_d_sparse, dist_sparse)
-        rgb, sigma = out[:, :3], out[:, 3:]
-        alpha = 1.0 - torch.exp(-sigma)
+        decay = torch.exp(- (norm ** 2) / (2.0 * (scales_sel.unsqueeze(1) ** 2 + 1e-12)))
 
-        # Basic alpha compositing
-        blended = torch.zeros(B, 3, device=ray_o.device)
-        accum = torch.zeros(B, 1, device=ray_o.device)
+        rgb, sigma_raw = self.mlps(ray_d, dist, idx=mlp_id)
+        sigma = sigma_raw * decay
 
-        for i in range(ray_idx.shape[0]):
-            w = alpha[i] * (1.0 - accum[ray_idx[i]])
-            blended[ray_idx[i]] += w * rgb[i]
-            accum[ray_idx[i]] += w
+        with torch.no_grad():
+            alpha = 1.0 - torch.exp(-sigma)
+            # alpha_sum = (alpha.squeeze(-1) * mask.squeeze(-1).float()).sum(dim=1)  # (M,)  # 注释掉 mask
+            alpha_sum = alpha.squeeze(-1).sum(dim=1)  # 简化版
+            old = self.alpha_accum.index_select(0, mlp_id)
+            new = 0.2 * old + 0.8 * alpha_sum
+            self.alpha_accum.scatter_(0, mlp_id, new)
 
+        sorted_inds = torch.argsort(t_sel, dim=0)  # (M,B)
+        gather_rgb = torch.gather(rgb, 0, sorted_inds.unsqueeze(-1).expand(-1, -1, 3))
+        gather_sigma = torch.gather(sigma, 0, sorted_inds.unsqueeze(-1))
+
+        alpha_sorted = 1.0 - torch.exp(-gather_sigma)
+        trans = torch.cumprod(
+            torch.cat([torch.ones(1, B, 1, device=device), 1.0 - alpha_sorted + 1e-12], dim=0)[:-1],
+            dim=0
+        )
+        weights = alpha_sorted * trans
+        blended = torch.sum(weights * gather_rgb, dim=0)  # (B,3)
         return blended
-
-
-

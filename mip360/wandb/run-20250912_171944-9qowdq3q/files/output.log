@@ -1,0 +1,15 @@
+  0%|                                     | 1/100000 [00:00<19:10:26,  1.45it/s]
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 23, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=15000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 253, in train_scene_llff
+    loss.backward()                             # 4. 反向传播
+    ^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/_tensor.py", line 653, in backward
+    torch.autograd.backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/graph.py", line 829, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 8.78 GiB. GPU 0 has a total capacity of 31.36 GiB of which 4.50 GiB is free. Including non-PyTorch memory, this process has 26.12 GiB memory in use. Of the allocated memory 17.30 GiB is allocated by PyTorch, and 8.23 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

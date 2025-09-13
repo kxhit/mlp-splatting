@@ -1,6 +1,6 @@
 import torch
 import matplotlib.pyplot as plt
-from model import NeuralPrimitiveScene
+from vmodel import NeuralPrimitiveScene
 import os
 import imageio
 import numpy as np
@@ -85,7 +85,7 @@ def viz(pred_img, gt_img, mlp_idx, img_idx, scale, output_dir, block=False):
 import torch
 import matplotlib.pyplot as plt
 import gc
-from model import NeuralPrimitiveScene
+from vmodel import NeuralPrimitiveScene
 from mip360_loader import mip360Dataset
 
 fig = None
@@ -95,7 +95,7 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = mip360Dataset(data_dir, split='train')
 
     total = 0.0
 
@@ -118,12 +118,15 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
 
         # Debug scales
         scales = torch.exp(scene.log_scales)
+
+        """
         print('scene scales ', scales)
         print('Number of scales > 1:', (scales > 1).sum().item())
         print('Number of scales < 0.001:', (scales < 0.001).sum().item())
+        """
 
         # ---------------- Predict in batches ----------------
-        batch_size = 100000
+        batch_size = 10000
         pred_rgb_chunks = []
         for i in range(0, rays_o.shape[0], batch_size):
             chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately

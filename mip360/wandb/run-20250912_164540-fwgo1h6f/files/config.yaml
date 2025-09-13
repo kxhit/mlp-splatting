@@ -1,0 +1,66 @@
+_wandb:
+    value:
+        cli_version: 0.21.3
+        e:
+            a9ds487h70492opnwox6lhz6brv56c3k:
+                codePath: mip360/run.py
+                codePathLocal: run.py
+                cpu_count: 14
+                cpu_count_logical: 14
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "1966736678912"
+                        used: "138491105280"
+                email: ucab181@ucl.ac.uk
+                executable: /home/yuzhou/anaconda3/envs/mlp-splatting/bin/python
+                git:
+                    commit: 159238d64d952d991b9f3501f91d83093c8dc644
+                    remote: git@github.com:kxhit/mlp-splatting.git
+                gpu: NVIDIA GeForce RTX 5090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 21760
+                      memoryTotal: "34190917632"
+                      name: NVIDIA GeForce RTX 5090
+                      uuid: GPU-238bdbd5-9f06-da6d-09f6-830fd831e817
+                host: yuzhou
+                memory:
+                    total: "134562435072"
+                os: Linux-6.11.0-29-generic-x86_64-with-glibc2.39
+                program: /home/yuzhou/Desktop/mlp-splatting/mip360/run.py
+                python: CPython 3.11.13
+                root: /home/yuzhou/Desktop/mlp-splatting/mip360
+                startedAt: "2025-09-12T15:45:40.286411Z"
+                writerId: a9ds487h70492opnwox6lhz6brv56c3k
+        m: []
+        python_version: 3.11.13
+        t:
+            "1":
+                - 1
+                - 41
+            "2":
+                - 1
+                - 41
+            "3":
+                - 13
+                - 16
+            "4": 3.11.13
+            "5": 0.21.3
+            "12": 0.21.3
+            "13": linux-x86_64
+batch_size:
+    value: 15000
+hidden_dim:
+    value: 26
+lr:
+    value: 0.001
+num_epochs:
+    value: 100000
+num_layers:
+    value: 1
+num_primitives:
+    value: 1021
+pe_frequencies:
+    value: 6

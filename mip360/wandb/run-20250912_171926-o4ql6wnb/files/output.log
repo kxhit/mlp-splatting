@@ -1,0 +1,15 @@
+  0%|                                     | 38/100000 [00:06<4:27:04,  6.24it/s]
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 23, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=10000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 253, in train_scene_llff
+    loss.backward()                             # 4. 反向传播
+    ^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/_tensor.py", line 653, in backward
+    torch.autograd.backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/graph.py", line 829, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

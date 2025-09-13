@@ -1,0 +1,8 @@
+  0%|                                     | 66/100000 [00:07<3:06:14,  8.94it/s]
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 23, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=15000, initial_num_primitives=1021)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 265, in train_scene_llff
+    loss_accum += loss.item()
+                  ^^^^^^^^^^^
+KeyboardInterrupt
