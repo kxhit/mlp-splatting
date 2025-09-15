@@ -1,0 +1,535 @@
+  3%|▊                           | 2696/100000 [00:58<33:56, 47.78it/s]
+[Epoch 100] avg 100 loss : 0.029577
+[Epoch 200] avg 100 loss : 0.014688
+[Epoch 300] avg 100 loss : 0.011342
+[Epoch 400] avg 100 loss : 0.009804
+[Epoch 500] avg 100 loss : 0.008767
+[Epoch 600] avg 100 loss : 0.008129
+[Epoch 700] avg 100 loss : 0.007540
+[Epoch 800] avg 100 loss : 0.007163
+[Epoch 900] avg 100 loss : 0.006775
+[Epoch 1000] avg 100 loss : 0.006510
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.006258
+[Epoch 1200] avg 100 loss : 0.006039
+[Epoch 1300] avg 100 loss : 0.005864
+[Epoch 1400] avg 100 loss : 0.005722
+[Epoch 1500] avg 100 loss : 0.005572
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1600] avg 100 loss : 0.005449
+[Epoch 1700] avg 100 loss : 0.005295
+[Epoch 1800] avg 100 loss : 0.005209
+[Epoch 1900] avg 100 loss : 0.005097
+[Epoch 2000] avg 100 loss : 0.005018
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_02000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 2100] avg 100 loss : 0.004906
+[Epoch 2200] avg 100 loss : 0.004816
+[Epoch 2300] avg 100 loss : 0.004730
+[Epoch 2400] avg 100 loss : 0.004662
+[Epoch 2500] avg 100 loss : 0.004617
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 2600] avg 100 loss : 0.004544
+[Epoch 2700] avg 100 loss : 0.004523
+[Epoch 2800] avg 100 loss : 0.004433
+[Epoch 2900] avg 100 loss : 0.004406
+[Epoch 3000] avg 100 loss : 0.004330
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 3100] avg 100 loss : 0.004308
+[Epoch 3200] avg 100 loss : 0.004244
+[Epoch 3300] avg 100 loss : 0.004195
+[Epoch 3400] avg 100 loss : 0.004199
+[Epoch 3500] avg 100 loss : 0.004144
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 3600] avg 100 loss : 0.004113
+[Epoch 3700] avg 100 loss : 0.004080
+[Epoch 3800] avg 100 loss : 0.004037
+[Epoch 3900] avg 100 loss : 0.003988
+[Epoch 4000] avg 100 loss : 0.003953
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_04000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 4100] avg 100 loss : 0.003954
+[Epoch 4200] avg 100 loss : 0.003905
+[Epoch 4300] avg 100 loss : 0.003877
+[Epoch 4400] avg 100 loss : 0.003810
+[Epoch 4500] avg 100 loss : 0.003785
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 4600] avg 100 loss : 0.003775
+[Epoch 4700] avg 100 loss : 0.003737
+[Epoch 4800] avg 100 loss : 0.003725
+[Epoch 4900] avg 100 loss : 0.003724
+[Epoch 5000] avg 100 loss : 0.003686
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 5100] avg 100 loss : 0.003667
+[Epoch 5200] avg 100 loss : 0.003643
+[Epoch 5300] avg 100 loss : 0.003636
+[Epoch 5400] avg 100 loss : 0.003592
+[Epoch 5500] avg 100 loss : 0.003600
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 5600] avg 100 loss : 0.003563
+[Epoch 5700] avg 100 loss : 0.003558
+[Epoch 5800] avg 100 loss : 0.003534
+[Epoch 5900] avg 100 loss : 0.003506
+[Epoch 6000] avg 100 loss : 0.003516
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_06000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 6100] avg 100 loss : 0.003473
+[Epoch 6200] avg 100 loss : 0.003471
+[Epoch 6300] avg 100 loss : 0.003416
+[Epoch 6400] avg 100 loss : 0.003449
+[Epoch 6500] avg 100 loss : 0.003400
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 6600] avg 100 loss : 0.003344
+[Epoch 6700] avg 100 loss : 0.003373
+[Epoch 6800] avg 100 loss : 0.003346
+[Epoch 6900] avg 100 loss : 0.003321
+[Epoch 7000] avg 100 loss : 0.003334
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 7100] avg 100 loss : 0.003309
+[Epoch 7200] avg 100 loss : 0.003286
+[Epoch 7300] avg 100 loss : 0.003272
+[Epoch 7400] avg 100 loss : 0.003268
+[Epoch 7500] avg 100 loss : 0.003265
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 7600] avg 100 loss : 0.003248
+[Epoch 7700] avg 100 loss : 0.003245
+[Epoch 7800] avg 100 loss : 0.003243
+[Epoch 7900] avg 100 loss : 0.003204
+[Epoch 8000] avg 100 loss : 0.003215
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_08000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 8100] avg 100 loss : 0.003187
+[Epoch 8200] avg 100 loss : 0.003178
+[Epoch 8300] avg 100 loss : 0.003179
+[Epoch 8400] avg 100 loss : 0.003154
+[Epoch 8500] avg 100 loss : 0.003153
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 8600] avg 100 loss : 0.003147
+[Epoch 8700] avg 100 loss : 0.003094
+[Epoch 8800] avg 100 loss : 0.003081
+[Epoch 8900] avg 100 loss : 0.003099
+[Epoch 9000] avg 100 loss : 0.003068
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 9100] avg 100 loss : 0.003066
+[Epoch 9200] avg 100 loss : 0.003058
+[Epoch 9300] avg 100 loss : 0.003047
+[Epoch 9400] avg 100 loss : 0.003061
+[Epoch 9500] avg 100 loss : 0.003045
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 9600] avg 100 loss : 0.003040
+[Epoch 9700] avg 100 loss : 0.003038
+[Epoch 9800] avg 100 loss : 0.003017
+[Epoch 9900] avg 100 loss : 0.003000
+[Epoch 10000] avg 100 loss : 0.003004
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_10000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 10100] avg 100 loss : 0.003008
+[Epoch 10200] avg 100 loss : 0.002990
+[Epoch 10300] avg 100 loss : 0.002981
+[Epoch 10400] avg 100 loss : 0.002969
+[Epoch 10500] avg 100 loss : 0.002969
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 10600] avg 100 loss : 0.002970
+[Epoch 10700] avg 100 loss : 0.002945
+[Epoch 10800] avg 100 loss : 0.002952
+[Epoch 10900] avg 100 loss : 0.002896
+[Epoch 11000] avg 100 loss : 0.002895
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 11100] avg 100 loss : 0.002897
+[Epoch 11200] avg 100 loss : 0.002891
+[Epoch 11300] avg 100 loss : 0.002880
+[Epoch 11400] avg 100 loss : 0.002891
+[Epoch 11500] avg 100 loss : 0.002878
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 11600] avg 100 loss : 0.002865
+[Epoch 11700] avg 100 loss : 0.002877
+[Epoch 11800] avg 100 loss : 0.002872
+[Epoch 11900] avg 100 loss : 0.002860
+[Epoch 12000] avg 100 loss : 0.002842
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_12000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 12100] avg 100 loss : 0.002861
+[Epoch 12200] avg 100 loss : 0.002853
+[Epoch 12300] avg 100 loss : 0.002844
+[Epoch 12400] avg 100 loss : 0.002829
+[Epoch 12500] avg 100 loss : 0.002815
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 12600] avg 100 loss : 0.002828
+[Epoch 12700] avg 100 loss : 0.002815
+[Epoch 12800] avg 100 loss : 0.002816
+[Epoch 12900] avg 100 loss : 0.002812
+[Epoch 13000] avg 100 loss : 0.002764
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 13100] avg 100 loss : 0.002761
+[Epoch 13200] avg 100 loss : 0.002766
+[Epoch 13300] avg 100 loss : 0.002746
+[Epoch 13400] avg 100 loss : 0.002751
+[Epoch 13500] avg 100 loss : 0.002757
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 13600] avg 100 loss : 0.002752
+[Epoch 13700] avg 100 loss : 0.002757
+[Epoch 13800] avg 100 loss : 0.002756
+[Epoch 13900] avg 100 loss : 0.002750
+[Epoch 14000] avg 100 loss : 0.002729
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_14000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 14100] avg 100 loss : 0.002746
+[Epoch 14200] avg 100 loss : 0.002724
+[Epoch 14300] avg 100 loss : 0.002725
+[Epoch 14400] avg 100 loss : 0.002717
+[Epoch 14500] avg 100 loss : 0.002723
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 14600] avg 100 loss : 0.002714
+[Epoch 14700] avg 100 loss : 0.002722
+[Epoch 14800] avg 100 loss : 0.002688
+[Epoch 14900] avg 100 loss : 0.002689
+[Epoch 15000] avg 100 loss : 0.002696
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 15100] avg 100 loss : 0.002671
+[Epoch 15200] avg 100 loss : 0.002640
+[Epoch 15300] avg 100 loss : 0.002646
+[Epoch 15400] avg 100 loss : 0.002651
+[Epoch 15500] avg 100 loss : 0.002648
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 15600] avg 100 loss : 0.002640
+[Epoch 15700] avg 100 loss : 0.002636
+[Epoch 15800] avg 100 loss : 0.002655
+[Epoch 15900] avg 100 loss : 0.002656
+[Epoch 16000] avg 100 loss : 0.002651
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_16000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 16100] avg 100 loss : 0.002649
+[Epoch 16200] avg 100 loss : 0.002631
+[Epoch 16300] avg 100 loss : 0.002640
+[Epoch 16400] avg 100 loss : 0.002632
+[Epoch 16500] avg 100 loss : 0.002624
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 16600] avg 100 loss : 0.002625
+[Epoch 16700] avg 100 loss : 0.002625
+[Epoch 16800] avg 100 loss : 0.002618
+[Epoch 16900] avg 100 loss : 0.002615
+[Epoch 17000] avg 100 loss : 0.002595
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 17100] avg 100 loss : 0.002613
+[Epoch 17200] avg 100 loss : 0.002616
+[Epoch 17300] avg 100 loss : 0.002566
+[Epoch 17400] avg 100 loss : 0.002560
+[Epoch 17500] avg 100 loss : 0.002569
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 17600] avg 100 loss : 0.002553
+[Epoch 17700] avg 100 loss : 0.002557
+[Epoch 17800] avg 100 loss : 0.002555
+[Epoch 17900] avg 100 loss : 0.002561
+[Epoch 18000] avg 100 loss : 0.002559
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_18000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 18100] avg 100 loss : 0.002548
+[Epoch 18200] avg 100 loss : 0.002561
+[Epoch 18300] avg 100 loss : 0.002547
+[Epoch 18400] avg 100 loss : 0.002554
+[Epoch 18500] avg 100 loss : 0.002540
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 18600] avg 100 loss : 0.002551
+[Epoch 18700] avg 100 loss : 0.002551
+[Epoch 18800] avg 100 loss : 0.002541
+[Epoch 18900] avg 100 loss : 0.002536
+[Epoch 19000] avg 100 loss : 0.002530
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 19100] avg 100 loss : 0.002550
+[Epoch 19200] avg 100 loss : 0.002532
+[Epoch 19300] avg 100 loss : 0.002539
+[Epoch 19400] avg 100 loss : 0.002516
+[Epoch 19500] avg 100 loss : 0.002476
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 19600] avg 100 loss : 0.002507
+[Epoch 19700] avg 100 loss : 0.002480
+[Epoch 19800] avg 100 loss : 0.002486
+[Epoch 19900] avg 100 loss : 0.002477
+[Epoch 20000] avg 100 loss : 0.002505
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_20000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 20100] avg 100 loss : 0.002497
+[Epoch 20200] avg 100 loss : 0.002501
+[Epoch 20300] avg 100 loss : 0.002489
+[Epoch 20400] avg 100 loss : 0.002475
+[Epoch 20500] avg 100 loss : 0.002497
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 20600] avg 100 loss : 0.002486
+[Epoch 20700] avg 100 loss : 0.002487
+[Epoch 20800] avg 100 loss : 0.002473
+[Epoch 20900] avg 100 loss : 0.002477
+[Epoch 21000] avg 100 loss : 0.002486
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 21100] avg 100 loss : 0.002459
+[Epoch 21200] avg 100 loss : 0.002461
+[Epoch 21300] avg 100 loss : 0.002473
+[Epoch 21400] avg 100 loss : 0.002477
+[Epoch 21500] avg 100 loss : 0.002475
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 21600] avg 100 loss : 0.002443
+[Epoch 21700] avg 100 loss : 0.002423
+[Epoch 21800] avg 100 loss : 0.002449
+[Epoch 21900] avg 100 loss : 0.002427
+[Epoch 22000] avg 100 loss : 0.002453
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_22000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 22100] avg 100 loss : 0.002432
+[Epoch 22200] avg 100 loss : 0.002455
+[Epoch 22300] avg 100 loss : 0.002434
+[Epoch 22400] avg 100 loss : 0.002429
+[Epoch 22500] avg 100 loss : 0.002420
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 22600] avg 100 loss : 0.002423
+[Epoch 22700] avg 100 loss : 0.002432
+[Epoch 22800] avg 100 loss : 0.002419
+[Epoch 22900] avg 100 loss : 0.002401
+[Epoch 23000] avg 100 loss : 0.002441
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 23100] avg 100 loss : 0.002417
+[Epoch 23200] avg 100 loss : 0.002424
+[Epoch 23300] avg 100 loss : 0.002431
+[Epoch 23400] avg 100 loss : 0.002417
+[Epoch 23500] avg 100 loss : 0.002439
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 23600] avg 100 loss : 0.002415
+[Epoch 23700] avg 100 loss : 0.002405
+[Epoch 23800] avg 100 loss : 0.002348
+[Epoch 23900] avg 100 loss : 0.002364
+[Epoch 24000] avg 100 loss : 0.002400
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_24000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 24100] avg 100 loss : 0.002389
+[Epoch 24200] avg 100 loss : 0.002380
+[Epoch 24300] avg 100 loss : 0.002368
+[Epoch 24400] avg 100 loss : 0.002399
+[Epoch 24500] avg 100 loss : 0.002381
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 24600] avg 100 loss : 0.002374
+[Epoch 24700] avg 100 loss : 0.002387
+[Epoch 24800] avg 100 loss : 0.002388
+[Epoch 24900] avg 100 loss : 0.002376
+[Epoch 25000] avg 100 loss : 0.002375
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 25100] avg 100 loss : 0.002363
+[Epoch 25200] avg 100 loss : 0.002375
+[Epoch 25300] avg 100 loss : 0.002386
+[Epoch 25400] avg 100 loss : 0.002385
+[Epoch 25500] avg 100 loss : 0.002377
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 25600] avg 100 loss : 0.002358
+[Epoch 25700] avg 100 loss : 0.002390
+[Epoch 25800] avg 100 loss : 0.002371
+[Epoch 25900] avg 100 loss : 0.002355
+[Epoch 26000] avg 100 loss : 0.002342
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_26000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 26100] avg 100 loss : 0.002346
+[Epoch 26200] avg 100 loss : 0.002314
+[Epoch 26300] avg 100 loss : 0.002325
+[Epoch 26400] avg 100 loss : 0.002347
+[Epoch 26500] avg 100 loss : 0.002332
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 26600] avg 100 loss : 0.002338
+[Epoch 26700] avg 100 loss : 0.002356
+[Epoch 26800] avg 100 loss : 0.002338
+[Epoch 26900] avg 100 loss : 0.002333
+[Epoch 27000] avg 100 loss : 0.002335
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 27100] avg 100 loss : 0.002342
+[Epoch 27200] avg 100 loss : 0.002314
+[Epoch 27300] avg 100 loss : 0.002329
+[Epoch 27400] avg 100 loss : 0.002339
+[Epoch 27500] avg 100 loss : 0.002347
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 27600] avg 100 loss : 0.002327
+[Epoch 27700] avg 100 loss : 0.002324
+[Epoch 27800] avg 100 loss : 0.002334
+[Epoch 27900] avg 100 loss : 0.002338
+[Epoch 28000] avg 100 loss : 0.002338
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_28000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 28100] avg 100 loss : 0.002286
+[Epoch 28200] avg 100 loss : 0.002286
+[Epoch 28300] avg 100 loss : 0.002303
+[Epoch 28400] avg 100 loss : 0.002293
+[Epoch 28500] avg 100 loss : 0.002310
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 28600] avg 100 loss : 0.002303
+[Epoch 28700] avg 100 loss : 0.002293
+[Epoch 28800] avg 100 loss : 0.002309
+[Epoch 28900] avg 100 loss : 0.002306
+[Epoch 29000] avg 100 loss : 0.002296
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 29100] avg 100 loss : 0.002305
+[Epoch 29200] avg 100 loss : 0.002292
+[Epoch 29300] avg 100 loss : 0.002294
+[Epoch 29400] avg 100 loss : 0.002298
+[Epoch 29500] avg 100 loss : 0.002283
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 29600] avg 100 loss : 0.002301
+[Epoch 29700] avg 100 loss : 0.002286
+[Epoch 29800] avg 100 loss : 0.002304
+[Epoch 29900] avg 100 loss : 0.002297
+[Epoch 30000] avg 100 loss : 0.002291
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_30000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 30100] avg 100 loss : 0.002281
+[Epoch 30200] avg 100 loss : 0.002271
+[Epoch 30300] avg 100 loss : 0.002254
+[Epoch 30400] avg 100 loss : 0.002261
+[Epoch 30500] avg 100 loss : 0.002254
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 30600] avg 100 loss : 0.002260
+[Epoch 30700] avg 100 loss : 0.002266
+[Epoch 30800] avg 100 loss : 0.002284
+[Epoch 30900] avg 100 loss : 0.002271
+[Epoch 31000] avg 100 loss : 0.002260
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 31100] avg 100 loss : 0.002244
+[Epoch 31200] avg 100 loss : 0.002262
+[Epoch 31300] avg 100 loss : 0.002258
+[Epoch 31400] avg 100 loss : 0.002261
+[Epoch 31500] avg 100 loss : 0.002261
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 31600] avg 100 loss : 0.002279
+[Epoch 31700] avg 100 loss : 0.002277
+[Epoch 31800] avg 100 loss : 0.002295
+[Epoch 31900] avg 100 loss : 0.002266
+[Epoch 32000] avg 100 loss : 0.002249
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_32000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 32100] avg 100 loss : 0.002281
+[Epoch 32200] avg 100 loss : 0.002258
+[Epoch 32300] avg 100 loss : 0.002277
+[Epoch 32400] avg 100 loss : 0.002242
+[Epoch 32500] avg 100 loss : 0.002241
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 32600] avg 100 loss : 0.002252
+[Epoch 32700] avg 100 loss : 0.002243
+[Epoch 32800] avg 100 loss : 0.002238
+[Epoch 32900] avg 100 loss : 0.002247
+[Epoch 33000] avg 100 loss : 0.002250
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 33100] avg 100 loss : 0.002268
+[Epoch 33200] avg 100 loss : 0.002260
+[Epoch 33300] avg 100 loss : 0.002248
+[Epoch 33400] avg 100 loss : 0.002239
+[Epoch 33500] avg 100 loss : 0.002247
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 33600] avg 100 loss : 0.002249
+[Epoch 33700] avg 100 loss : 0.002251
+[Epoch 33800] avg 100 loss : 0.002242
+[Epoch 33900] avg 100 loss : 0.002224
+[Epoch 34000] avg 100 loss : 0.002257
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_34000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 34100] avg 100 loss : 0.002244
+[Epoch 34200] avg 100 loss : 0.002258
+[Epoch 34300] avg 100 loss : 0.002231
+[Epoch 34400] avg 100 loss : 0.002242
+[Epoch 34500] avg 100 loss : 0.002232
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 34600] avg 100 loss : 0.002214
+[Epoch 34700] avg 100 loss : 0.002195
+[Epoch 34800] avg 100 loss : 0.002205
+[Epoch 34900] avg 100 loss : 0.002227
+[Epoch 35000] avg 100 loss : 0.002209
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 35100] avg 100 loss : 0.002218
+[Epoch 35200] avg 100 loss : 0.002220
+[Epoch 35300] avg 100 loss : 0.002227
+[Epoch 35400] avg 100 loss : 0.002210
+[Epoch 35500] avg 100 loss : 0.002253
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 35600] avg 100 loss : 0.002230
+[Epoch 35700] avg 100 loss : 0.002217
+[Epoch 35800] avg 100 loss : 0.002251
+[Epoch 35900] avg 100 loss : 0.002220
+[Epoch 36000] avg 100 loss : 0.002223
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_36000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 36100] avg 100 loss : 0.002211
+[Epoch 36200] avg 100 loss : 0.002247
+[Epoch 36300] avg 100 loss : 0.002235
+[Epoch 36400] avg 100 loss : 0.002233
+[Epoch 36500] avg 100 loss : 0.002240
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 36600] avg 100 loss : 0.002238
+[Epoch 36700] avg 100 loss : 0.002189
+[Epoch 36800] avg 100 loss : 0.002176
+[Epoch 36900] avg 100 loss : 0.002184
+[Epoch 37000] avg 100 loss : 0.002183
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 37100] avg 100 loss : 0.002195
+[Epoch 37200] avg 100 loss : 0.002181
+[Epoch 37300] avg 100 loss : 0.002166
+[Epoch 37400] avg 100 loss : 0.002193
+[Epoch 37500] avg 100 loss : 0.002184
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 37600] avg 100 loss : 0.002213
+[Epoch 37700] avg 100 loss : 0.002215
+[Epoch 37800] avg 100 loss : 0.002202
+[Epoch 37900] avg 100 loss : 0.002196
+[Epoch 38000] avg 100 loss : 0.002194
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_38000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 38100] avg 100 loss : 0.002195
+[Epoch 38200] avg 100 loss : 0.002204
+[Epoch 38300] avg 100 loss : 0.002196
+[Epoch 38400] avg 100 loss : 0.002195
+[Epoch 38500] avg 100 loss : 0.002206
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 38600] avg 100 loss : 0.002194
+[Epoch 38700] avg 100 loss : 0.002196
+[Epoch 38800] avg 100 loss : 0.002193
+[Epoch 38900] avg 100 loss : 0.002140
+[Epoch 39000] avg 100 loss : 0.002150
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 39100] avg 100 loss : 0.002169
+[Epoch 39200] avg 100 loss : 0.002173
+[Epoch 39300] avg 100 loss : 0.002174
+[Epoch 39400] avg 100 loss : 0.002182
+[Epoch 39500] avg 100 loss : 0.002183
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 39600] avg 100 loss : 0.002190
+[Epoch 39700] avg 100 loss : 0.002190
+[Epoch 39800] avg 100 loss : 0.002164
+[Epoch 39900] avg 100 loss : 0.002171
+[Epoch 40000] avg 100 loss : 0.002191
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250915_143338_5409aaf1/scene_epoch_40000.pt
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 40100] avg 100 loss : 0.002181
+[Epoch 40200] avg 100 loss : 0.002172
+[Epoch 40300] avg 100 loss : 0.002162
+[Epoch 40400] avg 100 loss : 0.002179
+[Epoch 40500] avg 100 loss : 0.002192
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 40600] avg 100 loss : 0.002167
+[Epoch 40700] avg 100 loss : 0.002188
+[Epoch 40800] avg 100 loss : 0.002185
+[Epoch 40900] avg 100 loss : 0.002236
+[Epoch 41000] avg 100 loss : 0.002159
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 41100] avg 100 loss : 0.002147
+[Epoch 41200] avg 100 loss : 0.002131
+[Epoch 41300] avg 100 loss : 0.002143
+[Epoch 41400] avg 100 loss : 0.002180
+[Epoch 41500] avg 100 loss : 0.002156
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 41600] avg 100 loss : 0.002166
+[Epoch 41700] avg 100 loss : 0.002171
+[Epoch 41800] avg 100 loss : 0.002180
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 141, in train_scene_llff
+    loss.backward()                             # 4. Backpropagation
+    ^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/_tensor.py", line 653, in backward
+    torch.autograd.backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/__init__.py", line 354, in backward
+    _engine_run_backward(
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/graph.py", line 829, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

@@ -49,7 +49,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         {"params": scene.mlps.parameters()},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-1},
         {"params": scene.positions, "lr": 0},  # 初始设为较小值，保守一些
-        {"params": scene.rotations, "lr": 1e-2},
+        #{"params": scene.rotations, "lr": 1e-2},
     ], lr=1e-3)
 
 

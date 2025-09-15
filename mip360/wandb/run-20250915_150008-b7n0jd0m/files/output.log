@@ -1,0 +1,43 @@
+  0%|                               | 31/100000 [00:01<52:12, 31.91it/s]
+FORWARD PROFILE: topk_score+select:109.24 | geometry:11.16 | encode_PE:6.12 | mlp_fwd:380.92 | sort+gather:11.59 | composite:5.51 | stats:43.57 | total:568.11 ms
+FORWARD PROFILE: topk_score+select:2.19 | geometry:0.13 | encode_PE:0.55 | mlp_fwd:3.92 | sort+gather:0.05 | composite:0.12 | stats:0.24 | total:7.20 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.90 | sort+gather:0.04 | composite:0.11 | stats:0.22 | total:7.12 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.23 | total:7.10 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.08 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:3.89 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.10 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:4.78 | sort+gather:0.04 | composite:0.12 | stats:0.23 | total:8.00 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.07 | encode_PE:0.51 | mlp_fwd:3.90 | sort+gather:0.05 | composite:0.12 | stats:0.22 | total:7.05 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.09 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.18 | encode_PE:0.55 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.18 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.18 | encode_PE:0.55 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.16 ms
+FORWARD PROFILE: topk_score+select:2.23 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:4.73 | sort+gather:0.04 | composite:0.12 | stats:0.23 | total:8.02 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.23 | total:7.11 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.08 ms
+FORWARD PROFILE: topk_score+select:2.29 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.22 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.16 | encode_PE:0.56 | mlp_fwd:3.89 | sort+gather:0.09 | composite:0.13 | stats:0.24 | total:7.25 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:4.72 | sort+gather:0.04 | composite:0.04 | stats:0.23 | total:7.85 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.07 | encode_PE:0.51 | mlp_fwd:3.91 | sort+gather:0.09 | composite:0.14 | stats:0.22 | total:7.12 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.18 | encode_PE:0.54 | mlp_fwd:3.89 | sort+gather:0.05 | composite:0.13 | stats:0.24 | total:7.21 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.18 | encode_PE:0.54 | mlp_fwd:3.87 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.13 ms
+FORWARD PROFILE: topk_score+select:2.19 | geometry:0.19 | encode_PE:0.55 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.19 ms
+FORWARD PROFILE: topk_score+select:2.15 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:4.84 | sort+gather:0.04 | composite:0.11 | stats:0.22 | total:8.02 ms
+FORWARD PROFILE: topk_score+select:2.18 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.89 | sort+gather:0.05 | composite:0.11 | stats:0.24 | total:7.14 ms
+FORWARD PROFILE: topk_score+select:2.15 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:3.87 | sort+gather:0.06 | composite:0.12 | stats:0.22 | total:7.08 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.10 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:3.87 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.07 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:4.72 | sort+gather:0.04 | composite:0.11 | stats:0.24 | total:7.93 ms
+FORWARD PROFILE: topk_score+select:2.19 | geometry:0.19 | encode_PE:0.54 | mlp_fwd:3.89 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.19 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.18 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.10 | stats:0.22 | total:7.13 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.10 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.13 | encode_PE:0.54 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.24 | total:7.11 ms
+FORWARD PROFILE: topk_score+select:2.17 | geometry:0.12 | encode_PE:0.54 | mlp_fwd:4.73 | sort+gather:0.04 | composite:0.12 | stats:0.22 | total:7.93 ms
+FORWARD PROFILE: topk_score+select:2.16 | geometry:0.07 | encode_PE:0.52 | mlp_fwd:3.88 | sort+gather:0.05 | composite:0.11 | stats:0.23 | total:7.02 ms
+FORWARD PROFILE: topk_score+select:2.20 | geometry:0.14 | encode_PE:0.55 | mlp_fwd:3.89 | sort+gather:0.05 | composite:0.11 | stats:0.22 | total:7.16 ms
+FORWARD PROFILE: topk_score+select:2.19 | geometry:0.19 | encode_PE:0.54 | mlp_fwd:3.87 | sort+gather:0.05 | composite:0.11 | stats:0.24 | total:7.18 ms
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 153, in train_scene_llff
+    loss_accum += loss.item()
+                  ^^^^^^^^^^^
+KeyboardInterrupt
