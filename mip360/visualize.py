@@ -12,7 +12,7 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = mip360Dataset(data_dir, split='train')
 
     total = 0.0
 
@@ -24,7 +24,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         gt_rgb = rgbs.to(device).view(-1, 3)
 
         # ---------------- Load model ----------------
-        scene = NeuralPrimitiveScene(N, hidden_dim=26, pe_frequencies=6).to(device)
+        scene = NeuralPrimitiveScene(N, hidden_dim=32, pe_frequencies=6).to(device)
         if model_ckpt:
             scene.load_state_dict(model_ckpt)
         if mlp_idx is not None:
