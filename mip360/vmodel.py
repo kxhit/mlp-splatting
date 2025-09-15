@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from utils.sampling import octree_sample
+from utils.general_utils import qvec2rotmat
 
 
 class IntegratedPositionalEncoding(nn.Module):
@@ -105,6 +106,8 @@ class NeuralPrimitiveScene(nn.Module):
     def __init__(self, num_primitives=1024, hidden_dim=16, pe_frequencies=10, topk=128, initial_positions=None):
         super().__init__()
         self.num_primitives = num_primitives
+
+        # === positions ===
         if initial_positions is None:
             bound = 1.0
             self.positions = nn.Parameter(torch.rand(num_primitives, 3) * 2 * bound - bound)
@@ -114,7 +117,13 @@ class NeuralPrimitiveScene(nn.Module):
             sampled_scales /= 10
             self.positions = nn.Parameter(sampled_positions.clone().detach())
 
-        self.log_scales = nn.Parameter(torch.log(sampled_scales).unsqueeze(-1))
+        # === anisotropic scales (sx,sy,sz) ===
+        self.log_scales = nn.Parameter(torch.log(sampled_scales).unsqueeze(-1).repeat(1, 3))
+
+        # === rotations (quaternion, normalized) ===
+        self.rotations = nn.Parameter(F.normalize(torch.randn(num_primitives, 4), dim=-1))
+
+        # === per-primitive MLP ===
         self.mlps = BatchedPrimitiveMLP(
             num_primitives=num_primitives,
             input_dim=6,
@@ -127,6 +136,7 @@ class NeuralPrimitiveScene(nn.Module):
         self.register_buffer("occupancy_accum", torch.zeros(num_primitives))
         self.invalid_nums = 0
         self.topk = topk
+
 
     def forward(self, ray_o, ray_d, mlp_id=None):
         self.invalid_nums = 0
@@ -142,34 +152,30 @@ class NeuralPrimitiveScene(nn.Module):
         vec = centers - ray_o_nb
         t = torch.sum(vec * ray_d_nb, dim=-1, keepdim=True)
         proj = ray_o_nb + t * ray_d_nb
-        vec_perp = centers - proj
-
-        scales = torch.exp(self.log_scales)
+        dist = centers - proj   # (N,B,3)
 
         if mlp_id is None:
             mlp_id = torch.arange(N, device=device)
         M = mlp_id.shape[0]
 
-        dist = vec_perp.index_select(0, mlp_id)       # (M,B,3)
+        dist = dist.index_select(0, mlp_id)       # (M,B,3)
         t_sel = t.index_select(0, mlp_id).squeeze(-1) # (M,B)
-        scales_sel = scales.index_select(0, mlp_id)   # (M,1)
 
-        norm = torch.norm(dist, dim=-1, keepdim=True) # (M,B,1)
-        # mask = norm <= scales_sel.unsqueeze(1)      # (M,B,1)  # 暂时不用
+        # === anisotropic Gaussian ===
+        scales = torch.exp(self.log_scales)       # (N,3)
+        scales_sel = scales.index_select(0, mlp_id)  # (M,3)
 
-        decay = torch.exp(- (norm ** 2) / (2.0 * (scales_sel.unsqueeze(1) ** 2 + 1e-12)))
+        R = qvec2rotmat(self.rotations)           # (N,3,3)
+        R_sel = R.index_select(0, mlp_id)         # (M,3,3)
 
-        rgb, sigma_raw = self.mlps(ray_d, dist, idx=mlp_id)
+        dist_local = torch.einsum('mbj,mkj->mbk', dist, R_sel.transpose(-1, -2))  # (M,B,3)
+        decay = torch.exp(-0.5 * ((dist_local / (scales_sel.unsqueeze(1) + 1e-12)) ** 2).sum(-1, keepdim=True))
+
+        # === call MLP ===
+        rgb, sigma_raw = self.mlps(ray_d, dist, idx=mlp_id) # (M,B,3), (M,B,1)
         sigma = sigma_raw * decay
 
-        with torch.no_grad():
-            alpha = 1.0 - torch.exp(-sigma)
-            # alpha_sum = (alpha.squeeze(-1) * mask.squeeze(-1).float()).sum(dim=1)  # (M,)  # 注释掉 mask
-            alpha_sum = alpha.squeeze(-1).sum(dim=1)  # 简化版
-            old = self.alpha_accum.index_select(0, mlp_id)
-            new = 0.2 * old + 0.8 * alpha_sum
-            self.alpha_accum.scatter_(0, mlp_id, new)
-
+        # === alpha compositing ===
         sorted_inds = torch.argsort(t_sel, dim=0)  # (M,B)
         gather_rgb = torch.gather(rgb, 0, sorted_inds.unsqueeze(-1).expand(-1, -1, 3))
         gather_sigma = torch.gather(sigma, 0, sorted_inds.unsqueeze(-1))
@@ -181,4 +187,5 @@ class NeuralPrimitiveScene(nn.Module):
         )
         weights = alpha_sorted * trans
         blended = torch.sum(weights * gather_rgb, dim=0)  # (B,3)
+
         return blended

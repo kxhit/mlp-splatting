@@ -3,8 +3,8 @@ import torch
 
 class OctreeNode:
     def __init__(self, center, size, points, depth=0):
-        self.center = center   # cube 中心
-        self.size = size       # cube 边长 (严格 1/2^depth)
+        self.center = center   # cube center
+        self.size = size       # cube side length (exactly 1/2^depth)
         self.points = points
         self.children = []
         self.depth = depth
@@ -12,7 +12,7 @@ class OctreeNode:
 def build_octree(points, min_points=200, depth=0, center=None, root_size=None):
     points = np.asarray(points)
 
-    # 初始化 root
+    # Initialize root
     if depth == 0:
         mins, maxs = points.min(axis=0), points.max(axis=0)
         center = (mins + maxs) / 2
@@ -24,7 +24,7 @@ def build_octree(points, min_points=200, depth=0, center=None, root_size=None):
     if len(points) <= min_points:
         return node
 
-    # 子 cube 划分
+    # Sub-cube partition
     child_size = size / 2
     quarter = size / 4
     offsets = np.array([[dx, dy, dz] for dx in [-1, 1]
@@ -32,7 +32,7 @@ def build_octree(points, min_points=200, depth=0, center=None, root_size=None):
                                      for dz in [-1, 1]]) * quarter
     for off in offsets:
         sub_center = center + off
-        # 用严格区间避免边界点重复归属
+        # Use strict interval to avoid duplicate assignment of boundary points
         mask = np.all((points >= sub_center - child_size/2) & (points < sub_center + child_size/2), axis=1)
         if np.any(mask):
             child = build_octree(points[mask], min_points, depth+1, sub_center, root_size)
@@ -42,10 +42,10 @@ def build_octree(points, min_points=200, depth=0, center=None, root_size=None):
 
 
 def collect_leaf_info(node, use_centroid=True):
-    """收集所有 leaf 节点的 (位置, 半径)"""
+    """Collect all leaf nodes as (position, radius)"""
     if not node.children:  # leaf
         pos = node.points.mean(axis=0) if use_centroid else node.center
-        radius = node.size / 2 * np.sqrt(3)  # 半径为半对角线长度
+        radius = node.size / 2 * np.sqrt(3)  # radius = half diagonal length
         return [(pos, radius)]
     results = []
     for c in node.children:
@@ -53,7 +53,7 @@ def collect_leaf_info(node, use_centroid=True):
     return results
 
 def octree_sample(points, min_points=350, device="cpu"):
-    """从点云中采样，返回 (positions, radii)"""
+    """Sample from point cloud and return (positions, radii)"""
     root = build_octree(points, min_points=min_points)
     leaf_info = collect_leaf_info(root, use_centroid=True)
 
@@ -64,3 +64,4 @@ def octree_sample(points, min_points=350, device="cpu"):
     radii = torch.from_numpy(radii).float().to(device)
 
     return positions, radii
+

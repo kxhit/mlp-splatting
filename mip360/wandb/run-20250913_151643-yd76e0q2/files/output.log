@@ -1,0 +1,29 @@
+  2%|▋                                  | 1988/100000 [06:15<5:08:19,  5.30it/s]
+[Epoch 100] avg 100 loss : 0.067118
+[Epoch 200] avg 100 loss : 0.026397
+[Epoch 300] avg 100 loss : 0.021535
+[Epoch 400] avg 100 loss : 0.019123
+[Epoch 500] avg 100 loss : 0.017578
+[Epoch 600] avg 100 loss : 0.016492
+[Epoch 700] avg 100 loss : 0.015582
+[Epoch 800] avg 100 loss : 0.014988
+[Epoch 900] avg 100 loss : 0.014441
+[Epoch 1000] avg 100 loss : 0.013894
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.013530
+[Epoch 1200] avg 100 loss : 0.013163
+[Epoch 1300] avg 100 loss : 0.012834
+[Epoch 1400] avg 100 loss : 0.012555
+[Epoch 1500] avg 100 loss : 0.012288
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1600] avg 100 loss : 0.012054
+[Epoch 1700] avg 100 loss : 0.011789
+[Epoch 1800] avg 100 loss : 0.011610
+[Epoch 1900] avg 100 loss : 0.011410
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 23, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 265, in train_scene_llff
+    loss_accum += loss.item()
+                  ^^^^^^^^^^^
+KeyboardInterrupt
