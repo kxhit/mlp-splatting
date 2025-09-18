@@ -1,0 +1,31 @@
+  0%|                                      | 319/100000 [00:06<33:43, 49.26it/s]
+[Epoch 100] avg 100 loss : 0.028731
+[Epoch 200] avg 100 loss : 0.014307
+[Epoch 300] avg 100 loss : 0.010972
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2182)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 289, in forward
+    self._select_variable_k(ray_o, ray_d, float(score_threshold))
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 271, in _select_variable_k
+    _write_above_threshold[(B,)](
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 390, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 617, in run
+    kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/backends/nvidia/driver.py", line 708, in __call__
+    self.launch(gridX, gridY, gridZ, stream, function, self.launch_cooperative_grid, self.launch_pdl,
+KeyboardInterrupt

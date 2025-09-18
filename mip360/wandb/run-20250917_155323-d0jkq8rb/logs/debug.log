@@ -1,0 +1,122 @@
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_setup.py:_flush():81] Current SDK version is 0.21.3
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_setup.py:_flush():81] Configure stats pid to 3388982
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/.config/wandb/settings
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/settings
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_init.py:setup_run_log_directory():686] Logging user logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250917_155323-d0jkq8rb/logs/debug.log
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_init.py:setup_run_log_directory():687] Logging internal logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250917_155323-d0jkq8rb/logs/debug-internal.log
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_init.py:init():813] calling init triggers
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_init.py:init():818] wandb.init called with sweep_config: {}
+config: {'num_epochs': 100000, 'batch_size': 12000, 'lr': 0.001, 'num_primitives': 4819, 'hidden_dim': 26, 'pe_frequencies': 6, 'num_layers': 1, '_wandb': {}}
+2025-09-17 15:53:23,025 INFO    MainThread:3388982 [wandb_init.py:init():854] starting backend
+2025-09-17 15:53:23,229 INFO    MainThread:3388982 [wandb_init.py:init():857] sending inform_init request
+2025-09-17 15:53:23,230 INFO    MainThread:3388982 [wandb_init.py:init():865] backend started and connected
+2025-09-17 15:53:23,231 INFO    MainThread:3388982 [wandb_init.py:init():936] updated telemetry
+2025-09-17 15:53:23,234 INFO    MainThread:3388982 [wandb_init.py:init():960] communicating run to backend with 90.0 second timeout
+2025-09-17 15:53:23,750 INFO    MainThread:3388982 [wandb_init.py:init():1011] starting run threads in backend
+2025-09-17 15:53:23,796 INFO    MainThread:3388982 [wandb_run.py:_console_start():2494] atexit reg
+2025-09-17 15:53:23,797 INFO    MainThread:3388982 [wandb_run.py:_redirect():2342] redirect: wrap_raw
+2025-09-17 15:53:23,797 INFO    MainThread:3388982 [wandb_run.py:_redirect():2411] Wrapping output streams.
+2025-09-17 15:53:23,797 INFO    MainThread:3388982 [wandb_run.py:_redirect():2434] Redirects installed.
+2025-09-17 15:53:23,798 INFO    MainThread:3388982 [wandb_init.py:init():1057] run started, returning control to user process
+2025-09-17 15:53:30,969 INFO    wandb-AsyncioManager-main:3388982 [service_client.py:_forward_responses():84] Reached EOF.
+2025-09-17 15:53:30,969 INFO    wandb-AsyncioManager-main:3388982 [mailbox.py:close():137] Closing mailbox, abandoning 1 handles.
+2025-09-17 15:53:42,978 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,980 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,980 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,987 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,987 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,987 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,988 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,988 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost
+2025-09-17 15:53:42,990 ERROR   wandb-AsyncioManager-main:3388982 [asyncio_manager.py:fn_wrap_exceptions():183] Uncaught exception in run_soon callback.
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 181, in fn_wrap_exceptions
+    await fn()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/service/service_client.py", line 65, in _send_server_request
+    await self._writer.drain()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 392, in drain
+    await self._protocol._drain_helper()
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/asyncio/streams.py", line 166, in _drain_helper
+    raise ConnectionResetError('Connection lost')
+ConnectionResetError: Connection lost

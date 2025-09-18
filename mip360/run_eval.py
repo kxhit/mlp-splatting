@@ -18,7 +18,9 @@ if __name__ == "__main__":
     # Path to dataset (change to your own scene path)
     data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
     # Path to trained model checkpoint
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250915_161605_8fa8c4b2/scene_epoch_50000.pt"
+    #model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_025504_67a196c4/scene_epoch_100000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_004540_b6d99f62/scene_epoch_100000.pt"
+    
 
     # Load model checkpoint (CPU map by default)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
@@ -29,8 +31,8 @@ if __name__ == "__main__":
 
     # Select subset of MLP primitives to render
     # Can set to list(range(N)) to render all MLPs
-    mlp_idx = list(range(312, 325))  
-    #mlp_idx = None  # Set to None to use all primitives
+    #mlp_idx = list(range(312, 325))  
+    mlp_idx = None  # Set to None to use all primitives
 
     """
     # Debug: inspect checkpoint contents

@@ -1,0 +1,11 @@
+  0%|▏                                     | 382/100000 [00:04<19:11, 86.53it/s]
+[Epoch 100] avg 100 loss : 0.028954
+[Epoch 200] avg 100 loss : 0.014292
+[Epoch 300] avg 100 loss : 0.011034
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 116, in train_scene_llff
+    rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

@@ -1,0 +1,65 @@
+  0%|                                                | 0/100000 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 347, in forward
+    self._select_variable_k(ray_o, ray_d, float(score_threshold))
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 120, in decorate_context
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 321, in _select_variable_k
+    write_blocks_kernel[(B, grid_n)](
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 390, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 594, in run
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/compiler/compiler.py", line 281, in compile
+    key = f"{triton_key()}-{src.hash()}-{backend.hash()}-{options.hash()}-{str(sorted(env_vars.items()))}"
+                            ^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/compiler/compiler.py", line 78, in hash
+    key = f"{self.fn.cache_key}-{str(self.attrs)}-{sorted_sig}-{constants_key}"
+             ^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 696, in cache_key
+    dependencies_finder.visit(self.parse())
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 418, in visit
+    return visitor(node)
+           ^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 426, in generic_visit
+    self.visit(item)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 418, in visit
+    return visitor(node)
+           ^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 163, in visit_FunctionDef
+    self.generic_visit(node)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 426, in generic_visit
+    self.visit(item)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 418, in visit
+    return visitor(node)
+           ^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 217, in visit_Assign
+    self.generic_visit(node)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 428, in generic_visit
+    self.visit(value)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 418, in visit
+    return visitor(node)
+           ^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 428, in generic_visit
+    self.visit(value)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/ast.py", line 418, in visit
+    return visitor(node)
+           ^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 156, in visit_Attribute
+    ret = getattr(lhs, node.attr)
+          ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: module 'triton.language' has no attribute 'stack'

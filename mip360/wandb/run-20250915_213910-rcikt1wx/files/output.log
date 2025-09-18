@@ -1,0 +1,45 @@
+  0%|                                                | 0/100000 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-4)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 517, in forward
+    idx_bk, t_bk, dist_bk, count = self._fused_select_and_sort(ray_o, ray_d, float(score_threshold), KMAX)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 480, in _fused_select_and_sort
+    _ray_select_topk_threshold[grid](
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 390, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/runtime/jit.py", line 594, in run
+    kernel = self.compile(src, target=target, options=options.__dict__)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/compiler/compiler.py", line 339, in compile
+    module = src.make_ir(options, codegen_fns, module_map, context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/triton/compiler/compiler.py", line 83, in make_ir
+    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+triton.compiler.errors.CompilationError: at 75:32:
+            dy_buf  = tl.where(mask & do_rep, dy, dy_buf)
+            dz_buf  = tl.where(mask & do_rep, dz, dz_buf)
+            sc_buf  = tl.where(mask & do_rep, sc, sc_buf)
+
+    # 统计有效数量（sc > -Inf 认为有效）
+    cnt = tl.sum(sc_buf > -1e20, axis=0)
+
+    # 写回 (B,KMAX)
+    base = pid * S_out_B
+    for k in range(0, KMAX):
+        off = base + k * S_out_K
+        tl.store(OUT_IDX + off, idx_buf[k])
+                                ^
+ValueError('Did you forget to add @triton.jit ? (`_semantic` argument must be provided outside of JIT functions.)')

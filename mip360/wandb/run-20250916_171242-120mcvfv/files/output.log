@@ -1,0 +1,37 @@
+  2%|▋                                    | 1999/100000 [00:46<37:48, 43.20it/s]
+[Epoch 100] avg 100 loss : 0.028953
+[Epoch 200] avg 100 loss : 0.014292
+[Epoch 300] avg 100 loss : 0.011037
+[Epoch 400] avg 100 loss : 0.009427
+[Epoch 500] avg 100 loss : 0.008532
+[Epoch 600] avg 100 loss : 0.007829
+[Epoch 700] avg 100 loss : 0.007258
+[Epoch 800] avg 100 loss : 0.006887
+[Epoch 900] avg 100 loss : 0.006561
+[Epoch 1000] avg 100 loss : 0.006281
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.006071
+[Epoch 1200] avg 100 loss : 0.005880
+[Epoch 1300] avg 100 loss : 0.005707
+[Epoch 1400] avg 100 loss : 0.005522
+[Epoch 1500] avg 100 loss : 0.005387
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1600] avg 100 loss : 0.005258
+[Epoch 1700] avg 100 loss : 0.005158
+[Epoch 1800] avg 100 loss : 0.005045
+[Epoch 1900] avg 100 loss : 0.004923
+[Epoch 2000] avg 100 loss : 0.004839
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 179, in train_scene_llff
+    torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/serialization.py", line 966, in save
+    with _open_zipfile_writer(f) as opened_zipfile:
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/serialization.py", line 828, in _open_zipfile_writer
+    return container(name_or_buffer)  # type: ignore[arg-type]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/serialization.py", line 792, in __init__
+    torch._C.PyTorchFileWriter(
+RuntimeError: Parent directory /home/yuzhou/Desktop/output/mip360/20250916_171239_0704f122 does not exist.

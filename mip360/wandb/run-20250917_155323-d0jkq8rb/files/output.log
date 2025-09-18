@@ -1,0 +1,15 @@
+  0%|                                      | 228/100000 [00:06<47:53, 34.72it/s]
+[Epoch 100] avg 100 loss : 0.027930
+[Epoch 200] avg 100 loss : 0.013307
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=4819)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 149, in train_scene_llff
+    optimizer.step()                            # 5. Update parameters
+    ^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/optim/optimizer.py", line 501, in wrapper
+    with torch.autograd.profiler.record_function(profile_name):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/autograd/profiler.py", line 781, in __exit__
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any):
+
+KeyboardInterrupt

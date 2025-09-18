@@ -47,8 +47,8 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
 
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 1e-1},
-        {"params": scene.positions, "lr": 0},  # 初始设为较小值，保守一些
+        {"params": scene.log_scales, "lr": 1e-2},
+        {"params": scene.positions, "lr": 1e-2},  
         #{"params": scene.rotations, "lr": 1e-2},
     ], lr=1e-3)
 
@@ -136,7 +136,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         """
 
         optimizer.zero_grad()                       # 1. Clear gradients
-        pred = scene(rays_o_batch, rays_d_batch)    # 2. Forward pass
+        pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
         loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
         loss.backward()                             # 4. Backpropagation
 

@@ -1,0 +1,39 @@
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_setup.py:_flush():81] Current SDK version is 0.21.3
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_setup.py:_flush():81] Configure stats pid to 3388406
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/.config/wandb/settings
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/settings
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_init.py:setup_run_log_directory():686] Logging user logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250917_155106-u0mv0efy/logs/debug.log
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_init.py:setup_run_log_directory():687] Logging internal logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250917_155106-u0mv0efy/logs/debug-internal.log
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_init.py:init():813] calling init triggers
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_init.py:init():818] wandb.init called with sweep_config: {}
+config: {'num_epochs': 100000, 'batch_size': 12000, 'lr': 0.001, 'hidden_dim': 32, 'pe_frequencies': 6, 'num_layers': 1, '_wandb': {}}
+2025-09-17 15:51:06,495 INFO    MainThread:3388406 [wandb_init.py:init():854] starting backend
+2025-09-17 15:51:06,699 INFO    MainThread:3388406 [wandb_init.py:init():857] sending inform_init request
+2025-09-17 15:51:06,701 INFO    MainThread:3388406 [wandb_init.py:init():865] backend started and connected
+2025-09-17 15:51:06,702 INFO    MainThread:3388406 [wandb_init.py:init():936] updated telemetry
+2025-09-17 15:51:06,704 INFO    MainThread:3388406 [wandb_init.py:init():960] communicating run to backend with 90.0 second timeout
+2025-09-17 15:51:18,992 WARNING MainThread:3388406 [wandb_init.py:init():1571] [no run ID] interrupted
+Traceback (most recent call last):
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 1562, in init
+    run = wi.init(run_settings, run_config, run_printer)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/wandb_init.py", line 979, in init
+    result = wait_with_progress(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 23, in wait_with_progress
+    return wait_all_with_progress(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/mailbox/wait_with_progress.py", line 77, in wait_all_with_progress
+    return asyncer.run(progress_loop_with_timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/wandb/sdk/lib/asyncio_manager.py", line 136, in run
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/concurrent/futures/_base.py", line 451, in result
+    self._condition.wait(timeout)
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/threading.py", line 327, in wait
+    waiter.acquire()
+KeyboardInterrupt
+2025-09-17 15:51:18,993 INFO    wandb-AsyncioManager-main:3388406 [service_client.py:_forward_responses():84] Reached EOF.
+2025-09-17 15:51:18,993 INFO    wandb-AsyncioManager-main:3388406 [mailbox.py:close():137] Closing mailbox, abandoning 2 handles.

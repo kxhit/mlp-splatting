@@ -1,0 +1,23 @@
+2025-09-16 17:27:56,516 INFO    MainThread:3314660 [wandb_setup.py:_flush():81] Current SDK version is 0.21.3
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_setup.py:_flush():81] Configure stats pid to 3314660
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/.config/wandb/settings
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_setup.py:_flush():81] Loading settings from /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/settings
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_init.py:setup_run_log_directory():686] Logging user logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250916_172756-43ipuf0r/logs/debug.log
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_init.py:setup_run_log_directory():687] Logging internal logs to /home/yuzhou/Desktop/mlp-splatting/mip360/wandb/run-20250916_172756-43ipuf0r/logs/debug-internal.log
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_init.py:init():813] calling init triggers
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_init.py:init():818] wandb.init called with sweep_config: {}
+config: {'num_epochs': 100000, 'batch_size': 12000, 'lr': 0.001, 'num_primitives': 2183, 'hidden_dim': 26, 'pe_frequencies': 6, 'num_layers': 1, '_wandb': {}}
+2025-09-16 17:27:56,517 INFO    MainThread:3314660 [wandb_init.py:init():854] starting backend
+2025-09-16 17:27:56,720 INFO    MainThread:3314660 [wandb_init.py:init():857] sending inform_init request
+2025-09-16 17:27:56,722 INFO    MainThread:3314660 [wandb_init.py:init():865] backend started and connected
+2025-09-16 17:27:56,722 INFO    MainThread:3314660 [wandb_init.py:init():936] updated telemetry
+2025-09-16 17:27:56,725 INFO    MainThread:3314660 [wandb_init.py:init():960] communicating run to backend with 90.0 second timeout
+2025-09-16 17:27:57,644 INFO    MainThread:3314660 [wandb_init.py:init():1011] starting run threads in backend
+2025-09-16 17:27:57,689 INFO    MainThread:3314660 [wandb_run.py:_console_start():2494] atexit reg
+2025-09-16 17:27:57,690 INFO    MainThread:3314660 [wandb_run.py:_redirect():2342] redirect: wrap_raw
+2025-09-16 17:27:57,690 INFO    MainThread:3314660 [wandb_run.py:_redirect():2411] Wrapping output streams.
+2025-09-16 17:27:57,690 INFO    MainThread:3314660 [wandb_run.py:_redirect():2434] Redirects installed.
+2025-09-16 17:27:57,691 INFO    MainThread:3314660 [wandb_init.py:init():1057] run started, returning control to user process
+2025-09-16 17:28:08,413 INFO    wandb-AsyncioManager-main:3314660 [service_client.py:_forward_responses():84] Reached EOF.
+2025-09-16 17:28:08,413 INFO    wandb-AsyncioManager-main:3314660 [mailbox.py:close():137] Closing mailbox, abandoning 1 handles.

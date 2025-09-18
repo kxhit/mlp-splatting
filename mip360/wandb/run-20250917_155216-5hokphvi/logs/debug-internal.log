@@ -1,0 +1,13 @@
+{"time":"2025-09-17T15:52:16.414520407+01:00","level":"INFO","msg":"stream: starting","core version":"0.21.3"}
+{"time":"2025-09-17T15:52:16.7141751+01:00","level":"INFO","msg":"stream: created new stream","id":"5hokphvi"}
+{"time":"2025-09-17T15:52:16.71420094+01:00","level":"INFO","msg":"stream: started","id":"5hokphvi"}
+{"time":"2025-09-17T15:52:16.714239743+01:00","level":"INFO","msg":"handler: started","stream_id":"5hokphvi"}
+{"time":"2025-09-17T15:52:16.714261222+01:00","level":"INFO","msg":"sender: started","stream_id":"5hokphvi"}
+{"time":"2025-09-17T15:52:16.714234937+01:00","level":"INFO","msg":"writer: started","stream_id":"5hokphvi"}
+{"time":"2025-09-17T15:52:18.753586691+01:00","level":"INFO","msg":"stream: closing","id":"5hokphvi"}
+{"time":"2025-09-17T15:52:31.797235877+01:00","level":"ERROR","msg":"HTTP error","status":404,"method":"POST","url":"https://api.wandb.ai/graphql"}
+{"time":"2025-09-17T15:52:31.797318846+01:00","level":"ERROR","msg":"runfiles: CreateRunFiles returned error: returned error 404: {\"data\":{\"createRunFiles\":null},\"errors\":[{\"message\":\"project /mlp-splatting not found during createRunFiles\",\"path\":[\"createRunFiles\"]}]}"}
+{"time":"2025-09-17T15:52:31.797406331+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-09-17T15:52:31.797418286+01:00","level":"INFO","msg":"handler: closed","stream_id":"5hokphvi"}
+{"time":"2025-09-17T15:52:31.797464127+01:00","level":"INFO","msg":"sender: closed","stream_id":"5hokphvi"}
+{"time":"2025-09-17T15:52:31.797468512+01:00","level":"INFO","msg":"stream: closed","id":"5hokphvi"}

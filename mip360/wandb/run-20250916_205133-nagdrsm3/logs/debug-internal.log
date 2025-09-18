@@ -1,0 +1,41 @@
+{"time":"2025-09-16T20:51:33.252507912+01:00","level":"INFO","msg":"stream: starting","core version":"0.21.3"}
+{"time":"2025-09-16T20:51:33.607377063+01:00","level":"INFO","msg":"stream: created new stream","id":"nagdrsm3"}
+{"time":"2025-09-16T20:51:33.607395295+01:00","level":"INFO","msg":"stream: started","id":"nagdrsm3"}
+{"time":"2025-09-16T20:51:33.60753955+01:00","level":"INFO","msg":"writer: started","stream_id":"nagdrsm3"}
+{"time":"2025-09-16T20:51:33.607608463+01:00","level":"INFO","msg":"handler: started","stream_id":"nagdrsm3"}
+{"time":"2025-09-16T20:51:33.607625779+01:00","level":"INFO","msg":"sender: started","stream_id":"nagdrsm3"}
+{"time":"2025-09-16T20:53:49.622150148+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream\": dial tcp: lookup api.wandb.ai on 127.0.0.53:53: server misbehaving"}
+{"time":"2025-09-16T20:53:52.066699915+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream\": dial tcp: lookup api.wandb.ai on 127.0.0.53:53: server misbehaving"}
+{"time":"2025-09-16T20:53:56.934541378+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream\": dial tcp: lookup api.wandb.ai on 127.0.0.53:53: server misbehaving"}
+{"time":"2025-09-16T20:54:05.085393147+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream\": dial tcp: lookup api.wandb.ai on 127.0.0.53:53: server misbehaving"}
+{"time":"2025-09-16T20:54:19.005586946+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T20:54:23.105353014+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream\": dial tcp: lookup api.wandb.ai on 127.0.0.53:53: server misbehaving"}
+{"time":"2025-09-16T20:54:51.01478568+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T20:55:25.171059647+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T20:56:04.914573807+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T20:56:54.551348331+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T20:57:57.153065184+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T20:59:27.154588179+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T21:00:57.155752849+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:02:27.157141891+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:03:49.006585262+01:00","level":"WARN","msg":"sender: taking a long time","seconds":600.001084407,"work":"WorkRecord(*service_go_proto.Request_StopStatus); Control(local:true mailbox_slot:\"jql4ysto00or\" connection_id:\"1(@)\")"}
+{"time":"2025-09-16T21:03:57.158835658+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:04:00.525588316+01:00","level":"WARN","msg":"runwork: taking a long time","seconds":600.00045284,"work":"WorkRecord(*service_go_proto.Record_OutputRaw); Control(connection_id:\"1(@)\")"}
+{"time":"2025-09-16T21:04:03.961306896+01:00","level":"WARN","msg":"runwork: taking a long time","seconds":600.000845841,"work":"WorkRecord(*service_go_proto.Record_Stats); Control(always_send:true)"}
+{"time":"2025-09-16T21:04:03.961344316+01:00","level":"WARN","msg":"runwork: taking a long time","seconds":600.001041296,"work":"WorkRecord(*service_go_proto.Record_Stats); Control(always_send:true)"}
+{"time":"2025-09-16T21:05:27.159990132+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:06:57.161011475+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:08:27.162540049+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded"}
+{"time":"2025-09-16T21:09:57.163974693+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T21:10:57.608272006+01:00","level":"INFO","msg":"sender: succeeded after taking longer than expected","seconds":1028.60279683,"work":"WorkRecord(*service_go_proto.Request_StopStatus); Control(local:true mailbox_slot:\"jql4ysto00or\" connection_id:\"1(@)\")"}
+{"time":"2025-09-16T21:10:57.6087094+01:00","level":"INFO","msg":"runwork: succeeded after taking longer than expected","seconds":1013.648407955,"work":"WorkRecord(*service_go_proto.Record_Stats); Control(always_send:true)"}
+{"time":"2025-09-16T21:10:57.608716879+01:00","level":"INFO","msg":"runwork: succeeded after taking longer than expected","seconds":1017.083624606,"work":"WorkRecord(*service_go_proto.Record_OutputRaw); Control(connection_id:\"1(@)\")"}
+{"time":"2025-09-16T21:10:57.608721056+01:00","level":"INFO","msg":"runwork: succeeded after taking longer than expected","seconds":1013.648290608,"work":"WorkRecord(*service_go_proto.Record_Stats); Control(always_send:true)"}
+{"time":"2025-09-16T21:50:42.881591867+01:00","level":"INFO","msg":"api: retrying HTTP error","status":502,"url":"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream","body":"\n<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>502 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered a temporary error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>\n"}
+{"time":"2025-09-16T22:02:49.093901184+01:00","level":"INFO","msg":"api: retrying HTTP error","status":502,"url":"https://api.wandb.ai/files/ucab181-imperial-college-london/mlp-splatting/nagdrsm3/file_stream","body":"\n<html><head>\n<meta http-equiv=\"content-type\" content=\"text/html;charset=utf-8\">\n<title>502 Server Error</title>\n</head>\n<body text=#000000 bgcolor=#ffffff>\n<h1>Error: Server Error</h1>\n<h2>The server encountered a temporary error and could not complete your request.<p>Please try again in 30 seconds.</h2>\n<h2></h2>\n</body></html>\n"}
+{"time":"2025-09-16T22:51:49.167504889+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T22:53:07.245099588+01:00","level":"INFO","msg":"stream: closing","id":"nagdrsm3"}
+{"time":"2025-09-16T22:53:07.769679376+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-09-16T22:53:08.070988486+01:00","level":"INFO","msg":"handler: closed","stream_id":"nagdrsm3"}
+{"time":"2025-09-16T22:53:08.071062498+01:00","level":"INFO","msg":"sender: closed","stream_id":"nagdrsm3"}
+{"time":"2025-09-16T22:53:08.071082693+01:00","level":"INFO","msg":"stream: closed","id":"nagdrsm3"}

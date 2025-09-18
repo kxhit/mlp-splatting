@@ -1,0 +1,34 @@
+  2%|▌                                    | 1520/100000 [00:38<41:18, 39.74it/s]
+[Epoch 100] avg 100 loss : 0.343003
+[Epoch 200] avg 100 loss : 0.184038
+[Epoch 300] avg 100 loss : 0.128699
+[Epoch 400] avg 100 loss : 0.128649
+[Epoch 500] avg 100 loss : 0.128650
+[Epoch 600] avg 100 loss : 0.128577
+[Epoch 700] avg 100 loss : 0.128760
+[Epoch 800] avg 100 loss : 0.128600
+[Epoch 900] avg 100 loss : 0.128542
+[Epoch 1000] avg 100 loss : 0.128802
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.128600
+[Epoch 1200] avg 100 loss : 0.128610
+[Epoch 1300] avg 100 loss : 0.128423
+[Epoch 1400] avg 100 loss : 0.128766
+[Epoch 1500] avg 100 loss : 0.128360
+After pruning and densifying, scene has 2183 primitives.
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-8)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 585, in forward
+    seg_start[1:] = torch.cumsum(seg_len[:-1], dim=0)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

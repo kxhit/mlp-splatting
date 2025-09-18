@@ -1,0 +1,260 @@
+  0%|                                      | 6/100000 [00:00<2:18:30, 12.03it/s]
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 1] grad_norm min=0.000000e+00, median=2.063112e-04, max=2.810603e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 2] grad_norm min=0.000000e+00, median=2.114927e-04, max=2.622492e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 3] grad_norm min=0.000000e+00, median=2.186893e-04, max=2.497059e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 4] grad_norm min=0.000000e+00, median=1.963968e-04, max=2.445832e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 5] grad_norm min=0.000000e+00, median=1.952774e-04, max=2.290194e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 6] grad_norm min=0.000000e+00, median=1.785086e-04, max=2.164936e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 7] grad_norm min=0.000000e+00, median=1.915498e-04, max=2.031273e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 8] grad_norm min=0.000000e+00, median=1.756193e-04, max=1.829288e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 9] grad_norm min=0.000000e+00, median=1.905905e-04, max=1.684441e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 10] grad_norm min=0.000000e+00, median=1.862323e-04, max=1.487089e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 11] grad_norm min=0.000000e+00, median=1.844771e-04, max=1.480400e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 12] grad_norm min=0.000000e+00, median=1.714026e-04, max=1.247697e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 13] grad_norm min=0.000000e+00, median=1.566374e-04, max=1.135596e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 14] grad_norm min=0.000000e+00, median=1.608119e-04, max=1.079900e-02
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 15] grad_norm min=0.000000e+00, median=1.662117e-04, max=8.751336e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 16] grad_norm min=0.000000e+00, median=1.674448e-04, max=8.933385e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 17] grad_norm min=0.000000e+00, median=1.443896e-04, max=7.767150e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 18] grad_norm min=0.000000e+00, median=1.488187e-04, max=7.013115e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 19] grad_norm min=0.000000e+00, median=1.560128e-04, max=4.811391e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 20] grad_norm min=0.000000e+00, median=1.572529e-04, max=4.740385e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 21] grad_norm min=0.000000e+00, median=1.465902e-04, max=3.833783e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 22] grad_norm min=0.000000e+00, median=1.362976e-04, max=4.273168e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 23] grad_norm min=0.000000e+00, median=1.347086e-04, max=5.085852e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 24] grad_norm min=0.000000e+00, median=1.309334e-04, max=3.134526e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 25] grad_norm min=0.000000e+00, median=1.332775e-04, max=3.329577e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 26] grad_norm min=0.000000e+00, median=1.296504e-04, max=3.094198e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 27] grad_norm min=0.000000e+00, median=1.244607e-04, max=3.041692e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 28] grad_norm min=0.000000e+00, median=1.323533e-04, max=2.820174e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 29] grad_norm min=0.000000e+00, median=1.239296e-04, max=2.819171e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 30] grad_norm min=0.000000e+00, median=1.268942e-04, max=4.438209e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 31] grad_norm min=0.000000e+00, median=1.159632e-04, max=3.192965e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 32] grad_norm min=0.000000e+00, median=1.176125e-04, max=3.898169e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 33] grad_norm min=0.000000e+00, median=1.203363e-04, max=3.743782e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 34] grad_norm min=0.000000e+00, median=1.062335e-04, max=4.928768e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 35] grad_norm min=0.000000e+00, median=1.214772e-04, max=2.645776e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 36] grad_norm min=0.000000e+00, median=1.121021e-04, max=3.479930e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 37] grad_norm min=0.000000e+00, median=1.084931e-04, max=3.862866e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 38] grad_norm min=0.000000e+00, median=9.912000e-05, max=4.987094e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 39] grad_norm min=0.000000e+00, median=1.065140e-04, max=4.961766e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 40] grad_norm min=0.000000e+00, median=1.005041e-04, max=3.497205e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 41] grad_norm min=0.000000e+00, median=9.683718e-05, max=3.767665e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 42] grad_norm min=0.000000e+00, median=1.059456e-04, max=3.344044e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 43] grad_norm min=0.000000e+00, median=9.058609e-05, max=3.134863e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 44] grad_norm min=0.000000e+00, median=9.788074e-05, max=4.877908e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 45] grad_norm min=0.000000e+00, median=9.154346e-05, max=3.258175e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 46] grad_norm min=0.000000e+00, median=9.774092e-05, max=4.536284e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 47] grad_norm min=0.000000e+00, median=8.773468e-05, max=4.069883e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 48] grad_norm min=0.000000e+00, median=8.694065e-05, max=2.877430e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 49] grad_norm min=0.000000e+00, median=9.688956e-05, max=2.940417e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 50] grad_norm min=0.000000e+00, median=9.288741e-05, max=3.563721e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 51] grad_norm min=0.000000e+00, median=8.770516e-05, max=3.444540e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 52] grad_norm min=0.000000e+00, median=8.833590e-05, max=6.293886e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 53] grad_norm min=0.000000e+00, median=8.345599e-05, max=3.569344e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 54] grad_norm min=0.000000e+00, median=8.391081e-05, max=3.070213e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 55] grad_norm min=0.000000e+00, median=8.967327e-05, max=3.115428e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 56] grad_norm min=0.000000e+00, median=8.133973e-05, max=2.932576e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 57] grad_norm min=0.000000e+00, median=8.016556e-05, max=4.054099e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 58] grad_norm min=0.000000e+00, median=7.949647e-05, max=3.317661e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 59] grad_norm min=0.000000e+00, median=7.805287e-05, max=4.466381e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 60] grad_norm min=0.000000e+00, median=8.066978e-05, max=3.591501e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 61] grad_norm min=0.000000e+00, median=8.462028e-05, max=3.359377e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 62] grad_norm min=0.000000e+00, median=7.796814e-05, max=5.519733e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 63] grad_norm min=0.000000e+00, median=6.892984e-05, max=3.078150e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 64] grad_norm min=0.000000e+00, median=7.657942e-05, max=3.971390e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 65] grad_norm min=0.000000e+00, median=7.606418e-05, max=3.986617e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 66] grad_norm min=0.000000e+00, median=7.200889e-05, max=3.238296e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 67] grad_norm min=0.000000e+00, median=7.347565e-05, max=3.250645e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 68] grad_norm min=0.000000e+00, median=7.147239e-05, max=5.825860e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 69] grad_norm min=0.000000e+00, median=6.781462e-05, max=4.804660e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 70] grad_norm min=0.000000e+00, median=7.008613e-05, max=3.082795e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 71] grad_norm min=0.000000e+00, median=6.634455e-05, max=3.249926e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 72] grad_norm min=0.000000e+00, median=7.009705e-05, max=3.054840e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 73] grad_norm min=0.000000e+00, median=6.160077e-05, max=4.319455e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 74] grad_norm min=0.000000e+00, median=6.188922e-05, max=3.397390e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 75] grad_norm min=0.000000e+00, median=6.373005e-05, max=3.215085e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 76] grad_norm min=0.000000e+00, median=6.232306e-05, max=4.582378e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 77] grad_norm min=0.000000e+00, median=6.860477e-05, max=3.499699e-03
+scene.positions requires_grad: True
+scene.positions grad is None? False
+[Epoch 78] grad_norm min=0.000000e+00, median=6.318292e-05, max=3.526494e-03
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2182)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 317, in forward
+    x_enc = self.encoder(torch.cat([rd_m, dist_m], dim=-1))
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 29, in forward
+    return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

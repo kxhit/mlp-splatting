@@ -1,0 +1,14 @@
+{"time":"2025-09-16T16:04:46.537696942+01:00","level":"INFO","msg":"stream: starting","core version":"0.21.3"}
+{"time":"2025-09-16T16:05:16.642305074+01:00","level":"INFO","msg":"api: retrying error","error":"Post \"https://api.wandb.ai/graphql\": net/http: request canceled (Client.Timeout exceeded while awaiting headers)"}
+{"time":"2025-09-16T16:05:19.039869572+01:00","level":"INFO","msg":"stream: created new stream","id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.039893682+01:00","level":"INFO","msg":"stream: started","id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.039914697+01:00","level":"INFO","msg":"writer: started","stream_id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.039972617+01:00","level":"INFO","msg":"sender: started","stream_id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.039997327+01:00","level":"INFO","msg":"handler: started","stream_id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.040335793+01:00","level":"INFO","msg":"stream: closing","id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.522697714+01:00","level":"ERROR","msg":"HTTP error","status":404,"method":"POST","url":"https://api.wandb.ai/graphql"}
+{"time":"2025-09-16T16:05:19.522790986+01:00","level":"ERROR","msg":"runfiles: CreateRunFiles returned error: returned error 404: {\"data\":{\"createRunFiles\":null},\"errors\":[{\"message\":\"project /mlp-splatting not found during createRunFiles\",\"path\":[\"createRunFiles\"]}]}"}
+{"time":"2025-09-16T16:05:19.522880481+01:00","level":"INFO","msg":"fileTransfer: Close: file transfer manager closed"}
+{"time":"2025-09-16T16:05:19.522892533+01:00","level":"INFO","msg":"handler: closed","stream_id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.522941889+01:00","level":"INFO","msg":"sender: closed","stream_id":"oa0c4ng2"}
+{"time":"2025-09-16T16:05:19.522946613+01:00","level":"INFO","msg":"stream: closed","id":"oa0c4ng2"}

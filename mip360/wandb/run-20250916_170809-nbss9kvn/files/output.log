@@ -1,0 +1,56 @@
+  2%|▋                                    | 1895/100000 [00:29<25:40, 63.70it/s]
+[Epoch 100] avg 100 loss : 0.028954
+[Epoch 200] avg 100 loss : 0.014293
+[Epoch 300] avg 100 loss : 0.011036
+[Epoch 400] avg 100 loss : 0.009428
+[Epoch 500] avg 100 loss : 0.008534
+[Epoch 600] avg 100 loss : 0.007831
+[Epoch 700] avg 100 loss : 0.007258
+[Epoch 800] avg 100 loss : 0.006884
+[Epoch 900] avg 100 loss : 0.006556
+[Epoch 1000] avg 100 loss : 0.006276
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.006062
+[Epoch 1200] avg 100 loss : 0.005869
+[Epoch 1300] avg 100 loss : 0.005696
+[Epoch 1400] avg 100 loss : 0.005508
+[Epoch 1500] avg 100 loss : 0.005369
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1600] avg 100 loss : 0.005238
+[Epoch 1700] avg 100 loss : 0.005143
+[Epoch 1800] avg 100 loss : 0.005033
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 369, in forward
+    rgb_m, sigma_raw_m = self.mlps(x_enc, prim_ids)          # (M,3), (M,1)
+                         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 212, in forward
+    h = F.relu(self.lin1(x_enc, idx))
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 198, in forward
+    w = self.weight.index_select(0, idx)  # (M,H,D)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.AcceleratorError: CUDA error: device-side assert triggered
+Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.

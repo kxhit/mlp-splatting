@@ -1,0 +1,35 @@
+  1%|▌                                    | 1469/100000 [00:19<21:56, 74.82it/s]
+[Epoch 100] avg 100 loss : 0.028954
+[Epoch 200] avg 100 loss : 0.014293
+[Epoch 300] avg 100 loss : 0.011037
+[Epoch 400] avg 100 loss : 0.009431
+[Epoch 500] avg 100 loss : 0.008533
+[Epoch 600] avg 100 loss : 0.007828
+[Epoch 700] avg 100 loss : 0.007257
+[Epoch 800] avg 100 loss : 0.006883
+[Epoch 900] avg 100 loss : 0.006555
+[Epoch 1000] avg 100 loss : 0.006274
+After pruning and densifying, scene has 2183 primitives.
+[Epoch 1100] avg 100 loss : 0.006063
+[Epoch 1200] avg 100 loss : 0.005871
+[Epoch 1300] avg 100 loss : 0.005699
+[Epoch 1400] avg 100 loss : 0.005511
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=100000, batch_size=12000, initial_num_primitives=2183)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 411, in forward
+    self._debug_guard(ray_ids, prim_ids, seg_len, B=ray_o.shape[0])
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 297, in _debug_guard
+    raise RuntimeError(msg)
+RuntimeError: [COUNT MISMATCH] at idx=[8083, 8084]
+kernel: [31, 24, 15, 43, 32, 20, 22, 15, 39, 16, 16, 41, 35, 29, 35, 29, 46, 39, 19, 21, 26, 15, 21, 12, 24, 15, 15, 20, 22, 18, 18, 12]
+write : [31, 24, 15, 43, 32, 20, 22, 15, 39, 16, 16, 41, 35, 29, 35, 29, 46, 39, 19, 21, 26, 15, 21, 12, 24, 15, 15, 20, 22, 18, 18, 12]
