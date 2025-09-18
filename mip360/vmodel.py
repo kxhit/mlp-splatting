@@ -181,8 +181,8 @@ class IndexedMLP(nn.Module):
     def __init__(self, num_primitives, encoded_dim, hidden_dim=16):
         super().__init__()
         self.lin1 = IndexedLinearFlat(num_primitives, encoded_dim, hidden_dim)   # enc -> H
-        self.lin2 = IndexedLinearFlat(num_primitives, hidden_dim,  hidden_dim*2)   # H   -> H
-        self.lin3 = IndexedLinearFlat(num_primitives, hidden_dim*2,  4)            # H   -> 4
+        self.lin2 = IndexedLinearFlat(num_primitives, hidden_dim,  hidden_dim)   # H   -> H
+        self.lin3 = IndexedLinearFlat(num_primitives, hidden_dim,  4)            # H   -> 4
 
     def forward(self, x_enc, idx):
         h1 = F.relu(self.lin1(x_enc, idx))
