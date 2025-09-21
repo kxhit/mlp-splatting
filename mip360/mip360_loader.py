@@ -112,6 +112,18 @@ class mip360Dataset(Dataset):
         self.images = self.images[select_ids]
         self.poses = self.poses[select_ids]
 
+        # Expose selected indices and their corresponding image paths for UI/inspection
+        try:
+            self.select_ids = select_ids.tolist() if hasattr(select_ids, "tolist") else list(select_ids)
+        except Exception:
+            # fallback best-effort
+            self.select_ids = [int(i) for i in select_ids]
+        try:
+            self.image_paths_selected = [self.image_paths[i] for i in self.select_ids]
+        except Exception:
+            # keep parity with dataset length if something goes wrong
+            self.image_paths_selected = []
+
         print(f"Loaded {len(self.images)} images from {image_dir}")
 
 
