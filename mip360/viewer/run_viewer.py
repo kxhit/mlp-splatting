@@ -83,6 +83,15 @@ class ViewerApp:
 		self.use_dataset_pose = False
 		self.show_point_centers = False
 		self.overlay_point_radius_px = 2
+		# exclusion selection state
+		self.enable_exclude_select = False
+		self.excluded_mask = None  # torch.bool on CPU sized to num_primitives
+		self._log_scales_backup = None  # backup of original log_scales for restore
+		# rectangle selection state (Shift-drag / Ctrl+Shift-drag)
+		self._rect_select_active = False
+		self._rect_select_start = (0.0, 0.0)
+		self._rect_select_end = (0.0, 0.0)
+		self._rect_select_include = False  # True: include (ctrl+shift), False: exclude (shift only)
 		# track previous cumulative drag deltas per button to compute incremental deltas
 		self._left_drag_prev = None  # type: tuple[float, float] | None
 		self._right_drag_prev = None  # type: tuple[float, float] | None
@@ -140,7 +149,11 @@ class ViewerApp:
 			if self.dataset_labels:
 				self.dataset_combo = dpg.add_combo(label="Training View", items=self.dataset_labels, callback=self._on_select_view)
 				self.lock_checkbox = dpg.add_checkbox(label="Lock to dataset pose", default_value=False, callback=self._on_toggle_lock_view)
-			self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow)", default_value=False, callback=self._on_toggle_overlay)
+			self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow/red)", default_value=False, callback=self._on_toggle_overlay)
+			# Exclusion selection controls
+			self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
+			self.btn_all_set = dpg.add_button(label="all-set", callback=self._on_all_set, enabled=False)
+			self.btn_all_reset = dpg.add_button(label="all-reset", callback=self._on_all_reset, enabled=False)
 		with dpg.window(label="Render", width=self.W, height=self.H, pos=(10, 10)) as self.render_win:
 			with dpg.drawlist(width=self.W, height=self.H) as self.drawlist:
 				self.draw_image_id = dpg.draw_image(self.tex_id, (0, 0), (self.W, self.H))
@@ -154,6 +167,7 @@ class ViewerApp:
 			dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, callback=self._on_mouse_drag)
 			dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=self._on_mouse_drag_right)
 			dpg.add_mouse_wheel_handler(callback=self._on_mouse_wheel)
+			dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left, callback=self._on_mouse_click)
 			# key handlers for roll: '[' and ']'
 			dpg.add_key_press_handler(key=ord('['), callback=self._on_roll_ccw)
 			dpg.add_key_press_handler(key=ord(']'), callback=self._on_roll_cw)
@@ -194,6 +208,43 @@ class ViewerApp:
 		# a may contain button info; regardless, reset drag state
 		self._left_drag_prev = None
 		self._right_drag_prev = None
+		# finalize rectangle selection if active
+		if self._rect_select_active:
+			try:
+				x0, y0 = self._rect_select_start
+				x1, y1 = self._rect_select_end
+				x_min = min(x0, x1); x_max = max(x0, x1)
+				y_min = min(y0, y1); y_max = max(y0, y1)
+				# commit selection only if the rectangle has area
+				if abs(x_max - x_min) > 1 and abs(y_max - y_min) > 1 and self.show_point_centers:
+					self._ensure_exclusion_state()
+					if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+						c2w_used = self._current_c2w_for_projection()
+						with torch.no_grad():
+							points = self.scene.positions
+							px, py, valid = self._project_points_to_pixels(points, c2w_used)
+							px = px.numpy(); py = py.numpy(); valid = valid.numpy()
+							inside = (px >= x_min) & (px <= x_max) & (py >= y_min) & (py <= y_max) & valid
+							inside_t = torch.from_numpy(inside)
+							if self._rect_select_include:
+								# include -> un-exclude
+								self.excluded_mask[inside_t] = False
+							else:
+								# exclude
+								self.excluded_mask[inside_t] = True
+							# apply or restore depending on mode
+							if self.enable_exclude_select:
+								self._apply_exclusion_mask_to_scene()
+							else:
+								self._restore_scene_scales()
+			except Exception:
+				pass
+			# clear selection state
+			self._rect_select_active = False
+			self.needs_redraw = True
+			# do not treat this as an orbit drag
+			self._did_left_drag = False
+			return
 		# if user performed an orbit drag, commit the camera's current up as new yaw axis
 		if self._did_left_drag:
 			self.cam.commit_up_from_camera()
@@ -207,6 +258,55 @@ class ViewerApp:
 
 	def _on_mouse_drag(self, s, a):
 		if not self._mouse_over_render():
+			return
+		# If exclusion rectangle selection is active (Shift held), consume the drag for selection
+		shift_down = False
+		try:
+			shift_down = dpg.is_key_down(dpg.mvKey_LShift) or dpg.is_key_down(dpg.mvKey_RShift)
+		except Exception:
+			try:
+				shift_down = dpg.is_key_down(dpg.mvKey_Shift)
+			except Exception:
+				shift_down = False
+		if self.enable_exclude_select and self.show_point_centers and shift_down:
+			# initialize selection on first drag tick
+			if not self._rect_select_active:
+				# record start in drawing-local coordinates
+				try:
+					lx, ly = dpg.get_drawing_mouse_pos()
+				except Exception:
+					mx, my = dpg.get_mouse_pos()
+					try:
+						pmin = dpg.get_item_rect_min(self.draw_image_id)
+					except Exception:
+						pmin = dpg.get_item_rect_min(self.drawlist)
+					lx = mx - pmin[0]
+					ly = my - pmin[1]
+				self._rect_select_start = (float(lx), float(ly))
+				# include when ctrl is also down
+				ctrl_down = False
+				try:
+					ctrl_down = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+				except Exception:
+					try:
+						ctrl_down = dpg.is_key_down(dpg.mvKey_Control)
+					except Exception:
+						ctrl_down = False
+				self._rect_select_include = bool(ctrl_down)
+				self._rect_select_active = True
+			# always update current end point
+			try:
+				lx, ly = dpg.get_drawing_mouse_pos()
+			except Exception:
+				mx, my = dpg.get_mouse_pos()
+				try:
+					pmin = dpg.get_item_rect_min(self.draw_image_id)
+				except Exception:
+					pmin = dpg.get_item_rect_min(self.drawlist)
+				lx = mx - pmin[0]
+				ly = my - pmin[1]
+			self._rect_select_end = (float(lx), float(ly))
+			# do not orbit while selecting
 			return
 		dx, dy = a[1], a[2]
 		# compute incremental delta from cumulative drag deltas
@@ -337,6 +437,79 @@ class ViewerApp:
 	def _on_toggle_overlay(self, s, a):
 		self.show_point_centers = bool(a)
 		self.needs_redraw = True
+
+	def _on_toggle_exclude_mode(self, s, a):
+		self.enable_exclude_select = bool(a)
+		# enable/disable bulk buttons only when exclusion mode is on
+		try:
+			dpg.configure_item(self.btn_all_set, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.btn_all_reset, enabled=self.enable_exclude_select)
+		except Exception:
+			pass
+		# when turning off, restore original scales so all MLPs are visible; keep state
+		if not self.enable_exclude_select:
+			self._restore_scene_scales()
+		else:
+			# turning on: apply current mask
+			self._apply_exclusion_mask_to_scene()
+		self.needs_redraw = True
+
+	def _ensure_exclusion_state(self):
+		# initialize exclusion structures if needed
+		if self.excluded_mask is None:
+			try:
+				N = int(self.scene.positions.shape[0])
+			except Exception:
+				N = 0
+			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
+			self._log_scales_backup = None
+
+	def _apply_exclusion_mask_to_scene(self):
+		# Apply the current excluded_mask by shrinking log_scales of excluded primitives
+		self._ensure_exclusion_state()
+		if self.excluded_mask is None or self.excluded_mask.numel() == 0:
+			return
+		try:
+			device = self.scene.log_scales.device
+			nls = self.scene.log_scales
+			if self._log_scales_backup is None or self._log_scales_backup.shape != nls.shape:
+				self._log_scales_backup = nls.detach().clone()
+			new_vals = self._log_scales_backup.detach().clone().to(device)
+			mask_dev = self.excluded_mask.to(device)
+			if mask_dev.any():
+				new_vals[mask_dev, :] = -20.0  # effectively zero radius
+			with torch.no_grad():
+				nls.copy_(new_vals)
+		except Exception:
+			pass
+		self.needs_redraw = True
+
+	def _restore_scene_scales(self):
+		# Restore original log_scales from backup if available
+		try:
+			if self._log_scales_backup is not None and self.scene is not None:
+				with torch.no_grad():
+					self.scene.log_scales.copy_(self._log_scales_backup.to(self.scene.log_scales.device))
+		except Exception:
+			pass
+
+	def _on_all_set(self):
+		# Exclude all primitives (only active when exclusion mode is enabled)
+		if not self.enable_exclude_select:
+			return
+		self._ensure_exclusion_state()
+		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+			self.excluded_mask[:] = True
+			self._apply_exclusion_mask_to_scene()
+
+	def _on_all_reset(self):
+		# Include all primitives back
+		if not self.enable_exclude_select:
+			return
+		self._ensure_exclusion_state()
+		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+			self.excluded_mask[:] = False
+			self._apply_exclusion_mask_to_scene()
 
 	def _on_select_ckpt(self, s, a):
 		# a is the selected filename (basename)
@@ -487,7 +660,13 @@ class ViewerApp:
 			valid = valid.numpy()
 			h, w = self.H, self.W
 			r = int(max(1, self.overlay_point_radius_px))
-			# draw yellow points
+			mask_np = None
+			try:
+				if self.excluded_mask is not None and self.excluded_mask.numel() == points.shape[0]:
+					mask_np = self.excluded_mask.numpy()
+			except Exception:
+				mask_np = None
+			# draw points: yellow by default, red if excluded
 			for i in range(px.shape[0]):
 				if not valid[i]:
 					continue
@@ -495,6 +674,9 @@ class ViewerApp:
 				yi = int(round(py[i]))
 				if xi < 0 or xi >= w or yi < 0 or yi >= h:
 					continue
+				is_excl = False
+				if mask_np is not None and i < len(mask_np):
+					is_excl = bool(mask_np[i])
 				# small disk
 				for dy in range(-r, r+1):
 					for dx in range(-r, r+1):
@@ -502,10 +684,89 @@ class ViewerApp:
 							xp = xi + dx
 							yp = yi + dy
 							if 0 <= xp < w and 0 <= yp < h:
-								frame_cpu[yp, xp, 0] = 1.0
-								frame_cpu[yp, xp, 1] = 1.0
-								frame_cpu[yp, xp, 2] = 0.0
+								if is_excl:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 0.0
+									frame_cpu[yp, xp, 2] = 0.0
+								else:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 1.0
+									frame_cpu[yp, xp, 2] = 0.0
 		return frame_cpu
+
+	def _current_c2w_for_projection(self) -> torch.Tensor:
+		# build the c2w used for current rendering path, including dataset normalization
+		if self.use_dataset_pose and (self.dataset is not None) and (self.dataset_cam_idx is not None):
+			c2w_used = self.dataset.poses[self.dataset_cam_idx].to(self.device)
+		else:
+			c2w_used = self.cam.get_pose().to(self.device)
+			# map to training coords if dataset normalization exists
+			if self.dataset is not None and hasattr(self.dataset, 'avg_position') and hasattr(self.dataset, 'scale'):
+				try:
+					avg_np = self.dataset.avg_position
+					scale_val = float(self.dataset.scale)
+					avg = torch.tensor(avg_np, dtype=torch.float32, device=self.device)
+					c2w_used = c2w_used.clone()
+					c2w_used[:3, 3] = (c2w_used[:3, 3] - avg) * scale_val
+				except Exception:
+					pass
+		return c2w_used
+
+	def _on_mouse_click(self, s, a):
+		# Left-click handler; perform exclusion toggle when enabled and overlay visible with Ctrl pressed
+		try:
+			if not self.enable_exclude_select or not self.show_point_centers:
+				return
+			# check ctrl key
+			ctrl_down = False
+			try:
+				ctrl_down = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+			except Exception:
+				try:
+					ctrl_down = dpg.is_key_down(dpg.mvKey_Control)
+				except Exception:
+					ctrl_down = False
+			if not ctrl_down:
+				return
+			if not self._mouse_over_render():
+				return
+			# mouse position in drawing local coords
+			try:
+				lx, ly = dpg.get_drawing_mouse_pos()
+			except Exception:
+				mx, my = dpg.get_mouse_pos()
+				# prefer the image's rect if available, fallback to drawlist
+				try:
+					pmin = dpg.get_item_rect_min(self.draw_image_id)
+				except Exception:
+					pmin = dpg.get_item_rect_min(self.drawlist)
+				lx = mx - pmin[0]
+				ly = my - pmin[1]
+			if lx < 0 or ly < 0 or lx >= self.W or ly >= self.H:
+				return
+			self._ensure_exclusion_state()
+			if self.excluded_mask is None or self.excluded_mask.numel() == 0:
+				return
+			c2w_used = self._current_c2w_for_projection()
+			with torch.no_grad():
+				points = self.scene.positions
+				px, py, valid = self._project_points_to_pixels(points, c2w_used)
+				px = px.numpy(); py = py.numpy(); valid = valid.numpy()
+				best_i = -1; best_d2 = 1e9
+				pick_r = max(3, int(self.overlay_point_radius_px) + 2)
+				for i in range(px.shape[0]):
+					if not valid[i]:
+						continue
+					dx = px[i] - lx; dy = py[i] - ly
+					d2 = float(dx*dx + dy*dy)
+					if d2 < best_d2 and d2 <= (pick_r * pick_r):
+						best_d2 = d2; best_i = i
+				if best_i >= 0:
+					self.excluded_mask[best_i] = ~self.excluded_mask[best_i]
+					self._apply_exclusion_mask_to_scene()
+					self.needs_redraw = True
+		except Exception:
+			pass
 
 	def _render_once(self):
 		# 1) Render base resolution with MLP
@@ -599,6 +860,14 @@ class ViewerApp:
 		old = getattr(self, 'scene', None)
 		self.scene = new_scene
 		self.selected_ckpt_path = ckpt_path
+		# reset exclusion state for the new scene
+		try:
+			N = int(self.scene.positions.shape[0])
+			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
+			self._log_scales_backup = None
+		except Exception:
+			self.excluded_mask = None
+			self._log_scales_backup = None
 		# best effort free
 		try:
 			del old
