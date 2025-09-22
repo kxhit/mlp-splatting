@@ -20,7 +20,7 @@ if __name__ == "__main__":
     # Path to trained model checkpoint
     #model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_025504_67a196c4/scene_epoch_100000.pt"
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_004540_b6d99f62/scene_epoch_100000.pt"
-    
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250922_120437_989740b2/scene_epoch_500000.pt"
 
     # Load model checkpoint (CPU map by default)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
@@ -50,7 +50,7 @@ if __name__ == "__main__":
         model_ckpt=model_ckpt, 
         block=True, 
         mlp_idx=mlp_idx, 
-        N=2183
+        N=10786
     )
 
 

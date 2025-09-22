@@ -28,6 +28,40 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
         scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
 
+
+    
+    # Debug scales
+    scales = torch.exp(scene.log_scales)
+
+    import numpy as np
+    scales_np = scales.detach().cpu().numpy()
+
+    plt.figure(figsize=(6,4))
+
+    # 这里 bins=200，比原来的 50 多很多
+    bins = np.logspace(-4, 1, 200)  
+
+    plt.hist(scales_np, bins=bins, color='blue', alpha=0.7, edgecolor='black')
+
+    plt.xscale("log")
+    plt.xlabel("Scale value")
+    plt.ylabel("Count")
+    plt.title("Histogram of scales")
+
+    # 设置固定的 x 轴刻度
+    plt.xticks([0.001, 0.01, 0.1, 1, 10], labels=["0.001", "0.01", "0.1", "1", "10"])
+
+    plt.grid(True, which="both", ls="--", alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+    print('Scene scales ', scales)
+    print('Number of scales in total', len(scales))
+    print('Number of scales > 1:', (scales > 1).sum().item())
+    print('Number of 0.005 < scales < 0.01:', ((scales > 0.005) & (scales < 0.01)).sum().item())
+    print('Number of 0.001 < scales < 0.005:', ((scales > 0.001) & (scales < 0.005)).sum().item())
+    print('Number of scales < 0.001:', (scales < 0.001).sum().item())
+
     for img_idx in tqdm(range(len(dataset))):
         # ---------------- Load data ----------------
         rays_o, rays_d, rgbs = dataset[img_idx]
@@ -35,19 +69,8 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         rays_d = rays_d.to(device).view(-1, 3)
         gt_rgb = rgbs.to(device).view(-1, 3)
 
-
-
-        # Debug scales
-        #scales = torch.exp(scene.log_scales)
-
-        """
-        print('scene scales ', scales)
-        print('Number of scales > 1:', (scales > 1).sum().item())
-        print('Number of scales < 0.001:', (scales < 0.001).sum().item())
-        """
-
         # ---------------- Predict in batches ----------------
-        batch_size = 10000
+        batch_size = 5000
         pred_rgb_chunks = []
         for i in range(0, rays_o.shape[0], batch_size):
             chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
@@ -71,6 +94,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         print(f"\rImage {img_idx}: PSNR = {psnr:.2f} dB", end="", flush=True)
 
         # ---------------- Visualization ----------------
+
         """
         if fig is None:
             fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -87,10 +111,11 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
             ax1_img.axes.set_title(f"Prediction (PSNR: {psnr:.2f} dB)")
             fig.canvas.draw()
             fig.canvas.flush_events()
+
         """
         total += psnr
         plt.pause(0.001)
-
+        
 
     print("Average PSNR:", total / len(dataset))
 
