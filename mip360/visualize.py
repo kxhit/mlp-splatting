@@ -12,7 +12,7 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='test')
+    dataset = mip360Dataset(data_dir, split='train')
 
     total = 0.0
 
@@ -95,7 +95,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
 
         # ---------------- Visualization ----------------
 
-        """
+
         if fig is None:
             fig, axes = plt.subplots(1, 2, figsize=(12, 5))
             ax0_img = axes[0].imshow(gt_img[0].numpy())
@@ -112,9 +112,9 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
             fig.canvas.draw()
             fig.canvas.flush_events()
 
-        """
+
         total += psnr
-        plt.pause(0.001)
+        plt.pause(0.01)
         
 
     print("Average PSNR:", total / len(dataset))
