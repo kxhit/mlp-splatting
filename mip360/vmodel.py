@@ -210,6 +210,9 @@ class NeuralPrimitiveScene(nn.Module):
             sampled_scales = torch.ones(num_primitives) * 0.1
         else:
             sampled_positions, sampled_scales = octree_sample(initial_positions)
+
+            print("Sampled", len(sampled_positions), "initial positions from point cloud")
+            assert len(sampled_positions) == num_primitives
             sampled_scales /= 10
             self.positions = nn.Parameter(sampled_positions.clone().detach())
 

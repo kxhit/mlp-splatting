@@ -48,7 +48,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     optimizer = torch.optim.Adam([
         {"params": scene.mlps.parameters()},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-2},
-        {"params": scene.positions, "lr": 1e-2},  
+        {"params": scene.positions, "lr": 1e-3},  
         #{"params": scene.rotations, "lr": 1e-2},
     ], lr=1e-3)
 
@@ -69,9 +69,9 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
                 "batch_size": batch_size,
                 "lr": lr,
                 "num_primitives": initial_num_primitives,
-                "hidden_dim": 26,
+                "hidden_dim": 32,
                 "pe_frequencies": 6,
-                "num_layers": 1,   # 当前是单隐藏层，如果以后改成两层可以记录成2
+                "num_layers": 2,   # 当前是单隐藏层，如果以后改成两层可以记录成2
             }
         )
 
