@@ -50,13 +50,61 @@ class OrbitCamera:
         c2w[:3, 2] = forward
         c2w[:3, 3] = cam_pos
         return c2w
+    
+    def set_pose(self, c2w: torch.Tensor) -> None:
+        """
+        Set yaw, pitch, center, and control_up from a given camera-to-world pose.
+        - Uses existing self.radius for the orbit radius.
+        - Assumes c2w columns: [right, up, forward, cam_pos], z-forward (camera +Z looks at scene).
+        """
+        # accept 3x4 or 4x4
+        if c2w.shape[-2:] == (4, 4):
+            c2w = c2w[:3, :4]
+        elif c2w.shape[-2:] != (3, 4):
+            raise ValueError(f"c2w must be (3,4) or (4,4), got {tuple(c2w.shape)}")
+
+        c2w = c2w.to(dtype=torch.float32)
+
+        right = c2w[:3, 0]
+        up = c2w[:3, 1]
+        forward = c2w[:3, 2]
+        cam_pos = c2w[:3, 3]
+
+        # normalize basis just in case
+        eps = 1e-8
+        forward = forward / (forward.norm() + eps)
+        up = up / (up.norm() + eps)
+        right = right / (right.norm() + eps)
+
+        # center lies along camera forward at distance = self.radius
+        center = cam_pos + forward * float(self.radius)
+
+        # vector from center to camera defines spherical (yaw, pitch)
+        cam_dir = cam_pos - center
+        cam_dir = cam_dir / (cam_dir.norm() + eps)
+
+        x = float(cam_dir[0])
+        y = float(cam_dir[1])
+        z = float(cam_dir[2])
+
+        # graphics convention used in this class:
+        # cam_dir = [cos(pitch)*sin(yaw), sin(pitch), cos(pitch)*cos(yaw)]
+        new_pitch = math.asin(y)
+        new_yaw = math.atan2(x, z)
+
+        self.center = center
+        self.pitch = new_pitch
+        self.yaw = new_yaw
+
+        # commit control frame's up from given pose
+        self.control_up = up / (up.norm() + eps)
 
     def generate_rays(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         H, W = self.height, self.width
         i, j = torch.meshgrid(torch.arange(W, device=device), torch.arange(H, device=device), indexing="xy")
         dirs = torch.stack([
             (i - W * 0.5) / self.focal,
-            -(j - H * 0.5) / self.focal,
+            (j - H * 0.5) / self.focal,
             torch.ones_like(i, dtype=torch.float32)
         ], -1).to(torch.float32)  # (H,W,3)
 
@@ -146,7 +194,7 @@ class OrbitCamera:
         y = float(cam_dir[1])
         x = float(cam_dir[0])
         z = float(cam_dir[2])
-        new_pitch = float(max(-1.2, min(1.2, math.asin(y))))
+        new_pitch = float(math.asin(y))
         new_yaw = float(math.atan2(x, z))
         self.pitch = new_pitch
         self.yaw = new_yaw

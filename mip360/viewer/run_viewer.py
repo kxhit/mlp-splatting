@@ -87,14 +87,21 @@ class ViewerApp:
 		self.enable_exclude_select = False
 		self.excluded_mask = None  # torch.bool on CPU sized to num_primitives
 		self._log_scales_backup = None  # backup of original log_scales for restore
+		# PSNR status (default invalid)
+		self._psnr_valid = False
+		self._psnr_value = None
+		self._psnr_pending_idx = None
+		self.psnr_text = None
+		# delay PSNR computation by a frame after pose changes to avoid transient mismatch
+		self._psnr_delay_frames = 0
 		# rectangle selection state (Shift-drag / Ctrl+Shift-drag)
 		self._rect_select_active = False
 		self._rect_select_start = (0.0, 0.0)
 		self._rect_select_end = (0.0, 0.0)
 		self._rect_select_include = False  # True: include (ctrl+shift), False: exclude (shift only)
 		# track previous cumulative drag deltas per button to compute incremental deltas
-		self._left_drag_prev = None  # type: tuple[float, float] | None
-		self._right_drag_prev = None  # type: tuple[float, float] | None
+		self._left_drag_prev: tuple[float, float] | None = None
+		self._right_drag_prev: tuple[float, float] | None = None
 		self._did_left_drag = False
 
 		# dataset poses (optional)
@@ -128,6 +135,22 @@ class ViewerApp:
 			except Exception as e:
 				print("[viewer] Failed to load dataset poses:", e)
 
+		# If a dataset is provided, override initial width/height with the dataset image resolution
+		# (images are already loaded at the requested downscale factor), and recreate the camera
+		if self.dataset is not None and args.data_dir and os.path.isdir(args.data_dir):
+			try:
+				if (self.dataset_W is not None) and (self.dataset_H is not None):
+					if int(self.dataset_W) > 0 and int(self.dataset_H) > 0:
+						self.W = int(self.dataset_W)
+						self.H = int(self.dataset_H)
+						self.aspect = float(self.W) / float(self.H) if self.H != 0 else 1.0
+						self.base_W = int(self.W)
+						self.base_H = int(self.H)
+						# Recreate orbit camera to use the new base resolution
+						self.cam = OrbitCamera(self.base_W, self.base_H, fov_deg=args.fov)
+			except Exception:
+				pass
+
 		dpg.create_context()
 		dpg.create_viewport(title="MLP Splatting Viewer", width=self.W+320, height=self.H+80)
 		# texture registry and initial texture
@@ -137,7 +160,7 @@ class ViewerApp:
 
 		with dpg.window(label="Controls", width=300, height=self.H, pos=(self.W+10, 10)):
 			self.yaw_slider = dpg.add_slider_float(label="Yaw", default_value=0.0, min_value=-np.pi, max_value=np.pi, callback=self._on_yaw)
-			self.pitch_slider = dpg.add_slider_float(label="Pitch", default_value=0.0, min_value=-1.2, max_value=1.2, callback=self._on_pitch)
+			self.pitch_slider = dpg.add_slider_float(label="Pitch", default_value=0.0, min_value=-np.pi, max_value=np.pi, callback=self._on_pitch)
 			self.radius_slider = dpg.add_slider_float(label="Radius", default_value=self.cam.radius, min_value=0.3, max_value=5.0, callback=self._on_radius)
 			self.fov_slider = dpg.add_slider_float(label="FOV", default_value=self.cam.fov_deg, min_value=30.0, max_value=100.0, callback=self._on_fov)
 			self.size_slider = dpg.add_slider_int(label="Render Height (px)", default_value=self.H, min_value=200, max_value=1600, callback=self._on_resize_height)
@@ -149,6 +172,8 @@ class ViewerApp:
 			if self.dataset_labels:
 				self.dataset_combo = dpg.add_combo(label="Training View", items=self.dataset_labels, callback=self._on_select_view)
 				self.lock_checkbox = dpg.add_checkbox(label="Lock to dataset pose", default_value=False, callback=self._on_toggle_lock_view)
+				# PSNR readout (only valid when unlocked and exactly at a dataset pose)
+				self.psnr_text = dpg.add_text(default_value="PSNR: invalid")
 			self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow/red)", default_value=False, callback=self._on_toggle_overlay)
 			# Exclusion selection controls
 			self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
@@ -191,18 +216,22 @@ class ViewerApp:
 	def _on_yaw(self, s, a):
 		self.cam.yaw = float(a)
 		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_pitch(self, s, a):
 		self.cam.pitch = float(a)
 		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_radius(self, s, a):
 		self.cam.radius = float(a)
 		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_fov(self, s, a):
 		self.cam.fov_deg = float(a)
 		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_mouse_release(self, s, a):
 		# a may contain button info; regardless, reset drag state
@@ -317,6 +346,7 @@ class ViewerApp:
 		inc_dy = dy - self._left_drag_prev[1]
 		self._left_drag_prev = (dx, dy)
 		if abs(inc_dx) + abs(inc_dy) > 0:
+			self._invalidate_psnr()
 			# use orbit_by so orbit follows rolled up/right
 			self.cam.orbit_by(inc_dx, inc_dy, sensitivity=0.005)
 			self._did_left_drag = True
@@ -340,7 +370,8 @@ class ViewerApp:
 		inc_dy = dy - self._right_drag_prev[1]
 		self._right_drag_prev = (dx, dy)
 		if abs(inc_dx) + abs(inc_dy) > 0:
-			self.cam.pan(inc_dx, inc_dy)
+			self._invalidate_psnr()
+			self.cam.pan(inc_dx, -inc_dy)
 			self.needs_redraw = True
 
 	def _on_mouse_wheel(self, s, a):
@@ -358,6 +389,7 @@ class ViewerApp:
 			delta = a
 		self.cam.radius = float(np.clip(self.cam.radius * (0.9 if delta > 0 else 1.1), 0.3, 5.0))
 		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_screenshot(self):
 		ts = time.strftime("%Y%m%d_%H%M%S")
@@ -427,12 +459,23 @@ class ViewerApp:
 		self.dataset_cam_idx = idx
 		if idx is not None:
 			self._apply_dataset_pose_to_camera(idx)
+			# prepare to compute PSNR on next render (unlocked only)
+			self._psnr_pending_idx = idx
+			# add a one-frame delay to ensure pose/FOV changes are fully reflected in rays
+			self._psnr_delay_frames = 1
+			self._psnr_valid = False
+			try:
+				dpg.set_value(self.psnr_text, "PSNR: invalid")
+			except Exception:
+				pass
 		self.needs_redraw = True
 
 	def _on_toggle_lock_view(self, s, a):
 		# a is boolean
 		self.use_dataset_pose = bool(a)
 		self.needs_redraw = True
+		# PSNR only applies when unlocked
+		self._invalidate_psnr()
 
 	def _on_toggle_overlay(self, s, a):
 		self.show_point_centers = bool(a)
@@ -453,6 +496,17 @@ class ViewerApp:
 			# turning on: apply current mask
 			self._apply_exclusion_mask_to_scene()
 		self.needs_redraw = True
+
+	def _invalidate_psnr(self):
+		# Reset PSNR state and UI
+		self._psnr_valid = False
+		self._psnr_value = None
+		self._psnr_pending_idx = None
+		try:
+			if self.psnr_text is not None:
+				dpg.set_value(self.psnr_text, "PSNR: invalid")
+		except Exception:
+			pass
 
 	def _ensure_exclusion_state(self):
 		# initialize exclusion structures if needed
@@ -527,11 +581,13 @@ class ViewerApp:
 
 	def _on_roll_ccw(self, s=None, a=None):
 		# CCW when looking forward (increase roll)
+		self._invalidate_psnr()
 		self.cam.roll_by(+0.05)
 		self.needs_redraw = True
 
 	def _on_roll_cw(self, s=None, a=None):
 		# CW when looking forward (decrease roll)
+		self._invalidate_psnr()
 		self.cam.roll_by(-0.05)
 		self.needs_redraw = True
 
@@ -543,12 +599,14 @@ class ViewerApp:
 	def _on_dolly_forward(self, s=None, a=None):
 		# Move forward toward the scene along current forward direction
 		step = 0.05 * float(self.cam.radius)
+		self._invalidate_psnr()
 		self.cam.dolly(+step)
 		self.needs_redraw = True
 
 	def _on_dolly_backward(self, s=None, a=None):
 		# Move backward away from the scene along current forward direction
 		step = 0.05 * float(self.cam.radius)
+		self._invalidate_psnr()
 		self.cam.dolly(-step)
 		self.needs_redraw = True
 
@@ -557,31 +615,27 @@ class ViewerApp:
 		return math.degrees(2.0 * math.atan((0.5 * H) / max(1e-6, focal)))
 
 	def _apply_dataset_pose_to_camera(self, idx: int):
-		# Set orbit camera to match the dataset pose and FOV, but keep controls active
+		# Set orbit camera to exactly match the dataset pose and FOV
 		if self.dataset is None:
 			return
 		try:
 			pose = self.dataset.poses[idx]  # (3,4)
 		except Exception:
 			return
-		cam_pos = pose[:3, 3].cpu().numpy()
-		center = self.cam.center.cpu().numpy() if isinstance(self.cam.center, torch.Tensor) else np.array(self.cam.center)
-		offset = cam_pos - center
-		r = float(np.linalg.norm(offset) + 1e-8)
-		dirv = offset / max(r, 1e-8)
-		# yaw = atan2(x, z), pitch = asin(y)
-		yaw = float(math.atan2(dirv[0], dirv[2]))
-		pitch = float(np.clip(math.asin(dirv[1]), -1.2, 1.2))
 
-		# update camera params
-		self.cam.radius = r
-		self.cam.yaw = yaw
-		self.cam.pitch = pitch
+		# Scale up the pose by the dataset scale
+		pose = pose.clone()
+		pose[:3, 3] = pose[:3, 3] / self.dataset.scale
+		pose[:3, 3] = pose[:3, 3] + self.dataset.avg_position
+		self.cam.set_pose(pose)
 
-		# match FOV to dataset focal scaled to viewer height
+		# match FOV to dataset focal scaled to BASE render height (camera ray grid)
 		if self.dataset_focal is not None and self.dataset_H is not None:
-			focal_scaled = self.dataset_focal * (float(self.H) / float(self.dataset_H))
-			fov_deg = self._fov_from_focal(focal_scaled, self.H)
+			target_h = int(self.base_H)
+			if target_h <= 0:
+				target_h = int(self.cam.height)
+			focal_scaled = self.dataset_focal * (float(target_h) / float(self.dataset_H))
+			fov_deg = self._fov_from_focal(focal_scaled, target_h)
 			self.cam.fov_deg = float(np.clip(fov_deg, 30.0, 100.0))
 
 		# update UI sliders to reflect new camera params
@@ -603,7 +657,7 @@ class ViewerApp:
 		i, j = torch.meshgrid(torch.arange(Wt, device=self.device), torch.arange(Ht, device=self.device), indexing="xy")
 		dirs = torch.stack([
 			(i - Wt * 0.5) / focal_scaled,
-			-(j - Ht * 0.5) / focal_scaled,
+			(j - Ht * 0.5) / focal_scaled,
 			torch.ones_like(i, dtype=torch.float32)
 		], -1).to(torch.float32)
 		rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], -1)
@@ -644,8 +698,8 @@ class ViewerApp:
 		fov = math.radians(self.cam.fov_deg)
 		f_disp = 0.5 * float(self.H) / math.tan(0.5 * fov)
 		px = (x * f_disp / z) + (self.W * 0.5)
-		# flip Y to match ray generation convention (image Y down)
-		py = (-y * f_disp / z) + (self.H * 0.5)
+		# image Y increases downward to match dataset/eval convention
+		py = (y * f_disp / z) + (self.H * 0.5)
 		return px.cpu(), py.cpu(), valid.cpu()
 
 	def _draw_point_centers_overlay(self, frame_cpu: np.ndarray, c2w: torch.Tensor) -> np.ndarray:
@@ -714,6 +768,12 @@ class ViewerApp:
 
 	def _on_mouse_click(self, s, a):
 		# Left-click handler; perform exclusion toggle when enabled and overlay visible with Ctrl pressed
+		# Any click over render invalidates PSNR immediately
+		try:
+			if self._mouse_over_render():
+				self._invalidate_psnr()
+		except Exception:
+			pass
 		try:
 			if not self.enable_exclude_select or not self.show_point_centers:
 				return
@@ -819,6 +879,32 @@ class ViewerApp:
 			frame_base = fb_base.squeeze(0).permute(1, 2, 0)
 		else:
 			frame_base = torch.cat([rgb, torch.ones(self.base_H, self.base_W, 1, device=rgb.device)], dim=-1)
+		# Compute PSNR once when unlocked and exactly at a dataset pose
+		if (not self.use_dataset_pose) and (self.dataset is not None) and (self.dataset_cam_idx is not None) and (self._psnr_pending_idx == self.dataset_cam_idx) and (not self._psnr_valid) and (self._psnr_delay_frames == 0):
+			try:
+				with torch.no_grad():
+					Hb, Wb = int(frame_base.shape[0]), int(frame_base.shape[1])
+					gt = self.dataset.images[self.dataset_cam_idx].to(frame_base.device)  # (C,H,W) in [0,1]
+					if gt.shape[1] != Hb or gt.shape[2] != Wb:
+						gt = F.interpolate(gt.unsqueeze(0), size=(Hb, Wb), mode='bilinear', align_corners=False).squeeze(0)
+					gt = gt.permute(1, 2, 0).contiguous()  # (Hb,Wb,3)
+					pred = frame_base[..., :3].clamp(0.0, 1.0)
+					mse = torch.mean((pred - gt) ** 2)
+					if torch.isfinite(mse) and float(mse.item()) > 0.0:
+						psnr_val = - 10.0 * torch.log10(mse).item()
+					else:
+						psnr_val = float('inf')
+					self._psnr_value = float(psnr_val)
+					self._psnr_valid = True
+					try:
+						if math.isfinite(self._psnr_value):
+							dpg.set_value(self.psnr_text, f"PSNR: {self._psnr_value:.2f} dB")
+						else:
+							dpg.set_value(self.psnr_text, "PSNR: inf dB")
+					except Exception:
+						pass
+			except Exception:
+				pass
 		# 2) Upsample to current display size with bilinear (no extra dependency)
 		if self.W != self.base_W or self.H != self.base_H:
 			fb = frame_base.permute(2, 0, 1).unsqueeze(0)  # 1x4xHb x Wb
@@ -833,6 +919,10 @@ class ViewerApp:
 		# 4) Upload to texture
 		dpg.set_value(self.tex_id, frame_disp_cpu.reshape(-1).tolist())
 		self.last_frame = frame_disp_cpu
+
+		# Decrement PSNR delay counter at end of a successful render
+		if self._psnr_delay_frames > 0:
+			self._psnr_delay_frames -= 1
 
 	def _scan_ckpt_dir(self):
 		# Populate ckpt_items and ckpt_paths sorted by mtime desc
