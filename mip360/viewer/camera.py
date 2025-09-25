@@ -173,13 +173,13 @@ class OrbitCamera:
             axis_n = axis / (axis.norm() + 1e-8)
             c = math.cos(angle)
             s = math.sin(angle)
-            return vec * c + torch.cross(axis_n, vec) * s + axis_n * torch.dot(axis_n, vec) * (1.0 - c)
+            return vec * c + torch.linalg.cross(axis_n, vec) * s + axis_n * torch.dot(axis_n, vec) * (1.0 - c)
 
         # build axes from committed control up (which may be tilted)
         control_up = self.control_up
         forward = (center - cam_pos)
         forward = forward / (forward.norm() + 1e-8)
-        right_base = torch.cross(control_up, forward)
+        right_base = torch.linalg.cross(control_up, forward)
         right_base = right_base / (right_base.norm() + 1e-8)
 
         # yaw: rotate around control up by -dx (drag right -> orbit camera right)

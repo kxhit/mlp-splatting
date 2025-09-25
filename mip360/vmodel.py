@@ -91,7 +91,7 @@ def _count_above_threshold(
         perp2 = tl.maximum(dx*dx + dy*dy + dz*dz, 0.0)
         sc = tl.exp(-0.5 * perp2 / r2)
 
-        if sc > thr:
+        if (sc > thr) and (t > 0):
             cnt += 1
 
     tl.store(OUT_CNT + pid, cnt)
@@ -139,7 +139,7 @@ def _write_above_threshold(
         perp2 = tl.maximum(dx*dx + dy*dy + dz*dz, 0.0)
         sc = tl.exp(-0.5 * perp2 / r2)
 
-        if sc > thr:
+        if (sc > thr) and (t > 0):
             out_i = base + c
             tl.store(OUT_RAY  + out_i, pid)
             tl.store(OUT_PRIM + out_i, n)

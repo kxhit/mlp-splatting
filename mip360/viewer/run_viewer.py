@@ -625,8 +625,9 @@ class ViewerApp:
 
 		# Scale up the pose by the dataset scale
 		pose = pose.clone()
-		pose[:3, 3] = pose[:3, 3] / self.dataset.scale
-		pose[:3, 3] = pose[:3, 3] + self.dataset.avg_position
+		pose[:3, 3] = pose[:3, 3] / float(self.dataset.scale)
+		avg = torch.as_tensor(self.dataset.avg_position, dtype=torch.float32, device=pose.device)
+		pose[:3, 3] = pose[:3, 3] + avg
 		self.cam.set_pose(pose)
 
 		# match FOV to dataset focal scaled to BASE render height (camera ray grid)
