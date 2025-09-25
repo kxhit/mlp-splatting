@@ -1,0 +1,54 @@
+  1%|▍                                  | 2106/150000 [01:04<1:15:25, 32.68it/s]
+[Epoch 100] avg 100 loss : 0.040685
+[Epoch 200] avg 100 loss : 0.021947
+[Epoch 300] avg 100 loss : 0.019263
+[Epoch 400] avg 100 loss : 0.018149
+[Epoch 500] avg 100 loss : 0.017289
+[Epoch 600] avg 100 loss : 0.016751
+[Epoch 700] avg 100 loss : 0.016292
+[Epoch 800] avg 100 loss : 0.015946
+[Epoch 900] avg 100 loss : 0.015627
+[Epoch 1000] avg 100 loss : 0.015444
+After pruning and densifying, scene has 3525 primitives.
+[Epoch 1100] avg 100 loss : 0.015223
+[Epoch 1200] avg 100 loss : 0.015006
+[Epoch 1300] avg 100 loss : 0.014807
+[Epoch 1400] avg 100 loss : 0.014600
+[Epoch 1500] avg 100 loss : 0.014449
+After pruning and densifying, scene has 3525 primitives.
+[Epoch 1600] avg 100 loss : 0.014405
+[Epoch 1700] avg 100 loss : 0.014260
+[Epoch 1800] avg 100 loss : 0.014079
+[Epoch 1900] avg 100 loss : 0.013972
+[Epoch 2000] avg 100 loss : 0.013858
+[Checkpoint] Saved model to /home/yuzhou/Desktop/output/mip360/20250922_225105_2451927b/scene_epoch_02000.pt
+After pruning and densifying, scene has 3525 primitives.
+[Epoch 2100] avg 100 loss : 0.013659
+Traceback (most recent call last):
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/run.py", line 20, in <module>
+    train_scene_llff(data_dir, num_epochs=150000, batch_size=10000, initial_num_primitives=3525)
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/train.py", line 139, in train_scene_llff
+    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1773, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1784, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/Desktop/mlp-splatting/mip360/vmodel.py", line 340, in forward
+    sel = torch.unique(prim_ids)
+          ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/_jit_internal.py", line 627, in fn
+    return if_false(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/_jit_internal.py", line 627, in fn
+    return if_false(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/functional.py", line 1102, in _return_output
+    output, _, _ = _unique_impl(input, sorted, return_inverse, return_counts, dim)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/yuzhou/anaconda3/envs/mlp-splatting/lib/python3.11/site-packages/torch/functional.py", line 995, in _unique_impl
+    output, inverse_indices, counts = torch._unique2(
+                                      ^^^^^^^^^^^^^^^
+KeyboardInterrupt

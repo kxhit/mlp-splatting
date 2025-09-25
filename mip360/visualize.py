@@ -12,7 +12,7 @@ ax1_img = None
 @torch.no_grad()
 def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
     global fig, ax0_img, ax1_img
-    dataset = mip360Dataset(data_dir, split='train')
+    dataset = mip360Dataset(data_dir, split='test')
 
     total = 0.0
 
@@ -64,7 +64,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
 
     for img_idx in tqdm(range(len(dataset))):
         # ---------------- Load data ----------------
-        rays_o, rays_d, rgbs = dataset[img_idx]
+        rays_o, rays_d, rgbs, pose = dataset[img_idx]
         rays_o = rays_o.to(device).view(-1, 3)
         rays_d = rays_d.to(device).view(-1, 3)
         gt_rgb = rgbs.to(device).view(-1, 3)
@@ -120,6 +120,67 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
     print("Average PSNR:", total / len(dataset))
 
 
+
+@torch.no_grad()
+def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
+    global fig, ax0_img, ax1_img
+    dataset = mip360Dataset(data_dir, split='test')
+
+    scene = NeuralPrimitiveScene(N, hidden_dim=32, pe_frequencies=6).to(device)
+    # ---------------- Load model ----------------
+    
+    if model_ckpt:
+        scene.load_state_dict(model_ckpt)
+
+    if mlp_idx is not None:
+        scene.num_primitives = len(mlp_idx)
+        scene.mlps = torch.nn.ModuleList([scene.mlps[i] for i in mlp_idx])
+        scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
+        scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
+
+
+    for img_idx in tqdm(range(len(dataset))):
+        rays_o, rays_d, rgbs, pose = dataset[img_idx]
+        rays_o = rays_o.to(device).view(-1, 3)
+        rays_d = rays_d.to(device).view(-1, 3)
+
+        batch_size = 5000
+        pred_depth_chunks = []
+        for i in range(0, rays_o.shape[0], batch_size):
+            chunk_depth = scene.forward_depth(
+                rays_o[i:i+batch_size],
+                rays_d[i:i+batch_size],
+                pose.to(device)   # T_cw
+            ).cpu()
+            pred_depth_chunks.append(chunk_depth)
+            del chunk_depth
+            torch.cuda.empty_cache()
+
+        pred_depth = torch.cat(pred_depth_chunks, dim=0)
+        H, W = 260, 390
+        pred_depth_img = pred_depth.view(H, W).cpu().numpy()
+
+        # 可视化 Depth (固定范围 0–5)
+        if img_idx == 0:
+            fig_depth, ax_depth = plt.subplots(1, 1, figsize=(6, 5))
+            depth_img_artist = ax_depth.imshow(
+                pred_depth_img,
+                cmap="winter",   # 你可以换成 viridis / plasma / cividis
+                vmin=0.0,         # 最小深度
+                vmax=5.0          # 最大深度
+            )
+            ax_depth.set_title("Predicted Depth")
+            plt.colorbar(depth_img_artist, ax=ax_depth)
+            plt.tight_layout()
+            plt.ion()
+            plt.show()
+        else:
+            depth_img_artist.set_data(pred_depth_img)
+            fig_depth.canvas.draw()
+            fig_depth.canvas.flush_events()
+
+
+    plt.pause(1)
 
 
 
