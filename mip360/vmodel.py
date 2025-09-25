@@ -343,3 +343,75 @@ class NeuralPrimitiveScene(nn.Module):
             self.alpha_accum.scatter_(0, sel, new)
 
         return out
+    
+
+
+    def forward_depth(self, ray_o, ray_d, T_wc, score_threshold=1e-4):
+        """
+        渲染给定相机位姿下的颜色图和深度图
+        ray_o, ray_d: 世界坐标系下的射线起点和方向 (B,3)
+        T_wc: (3,4) 相机 -> 世界 的齐次变换矩阵
+        返回:
+            out:   (B,3) 颜色
+            depth: (B,1) 相机坐标系下的深度 (z)
+        """
+        B = ray_o.shape[0]
+        device = ray_o.device
+
+        ray_ids, prim_ids, t_m, dist_m, seg_len, offsets, ray_d_n = \
+            self._select_variable_k(ray_o, ray_d, float(score_threshold))
+
+        if prim_ids.numel() == 0:
+            return torch.zeros(B, 3, device=device), torch.zeros(B, 1, device=device)
+
+        # ---- sort ----
+        t_shift = t_m - t_m.min()
+        t_norm = (t_shift / (t_shift.max() + 1e-9) * (2**32 - 1)).to(torch.int64)
+        key = (ray_ids.to(torch.int64) << 32) | t_norm
+        order = torch.argsort(key)
+
+        ray_ids = ray_ids[order]
+        prim_ids = prim_ids[order]
+        dist_m = dist_m[order]
+        t_m = t_m[order]
+        
+
+        # ---- MLP ----
+        rd_m = ray_d_n[ray_ids]
+        x_enc = self.encoder(torch.cat([rd_m, dist_m], dim=-1))
+        rgb_m, sigma_raw_m = self.mlps(x_enc, prim_ids)
+
+        scales = torch.exp(self.log_scales).squeeze(-1)
+        s_m = scales.index_select(0, prim_ids).unsqueeze(-1)
+        decay = torch.exp(- (torch.norm(dist_m, dim=-1, keepdim=True) ** 2) /
+                        (2.0 * (s_m ** 2) + 1e-12))
+        sigma = sigma_raw_m * decay
+
+        alpha = 1.0 - torch.exp(-sigma)
+
+        s = torch.log(1.0 - alpha + 1e-12).squeeze(-1)
+        cs = torch.cumsum(s, dim=0)
+        cs_before = torch.zeros_like(cs); cs_before[1:] = cs[:-1]
+        start_for_pos = offsets[ray_ids]
+        baseline = cs_before.gather(0, start_for_pos)
+        trans = torch.exp(cs_before - baseline).unsqueeze(-1)
+        weights = alpha * trans
+
+
+        # ---- Depth compositing (相机坐标系 z) ----
+        # 交点的世界坐标
+        p_m = ray_o[ray_ids] + t_m.unsqueeze(-1) * ray_d_n[ray_ids]  # (M,3)
+        # 齐次坐标
+        p_m_h = torch.cat([p_m, torch.ones_like(p_m[:, :1])], dim=-1)  # (M,4)
+        # 世界 -> 相机
+        pose = torch.eye(4, device=device)
+        pose[:3, ] = T_wc
+        T_cw = torch.inverse(pose)
+        p_c_h = (T_cw @ p_m_h.T).T  # (M,4)
+        depth_m = p_c_h[:, 2:3]     # (M,1) 相机系 z 分量
+
+        depth = torch.zeros(B, 1, device=device)
+        depth.index_add_(0, ray_ids, weights * depth_m)
+
+        return depth
+

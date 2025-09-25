@@ -135,7 +135,7 @@ class mip360Dataset(Dataset):
         pose = self.poses[idx]
         rays_o, rays_d = self._get_rays(img.shape[1:], pose)
         #return rays_o.reshape(-1, 3), rays_d.reshape(-1, 3), img.permute(1, 2, 0).reshape(-1, 3)
-        return rays_o, rays_d, img.permute(1, 2, 0)
+        return rays_o, rays_d, img.permute(1, 2, 0), pose
 
     def _get_rays(self, img_hw, c2w):
         H, W = img_hw
