@@ -83,6 +83,8 @@ class ViewerApp:
 		self.use_dataset_pose = False
 		self.show_point_centers = False
 		self.overlay_point_radius_px = 2
+		# background toggle
+		self.white_bg = True
 		# exclusion selection state
 		self.enable_exclude_select = False
 		self.excluded_mask = None  # torch.bool on CPU sized to num_primitives
@@ -164,6 +166,7 @@ class ViewerApp:
 			self.radius_slider = dpg.add_slider_float(label="Radius", default_value=self.cam.radius, min_value=0.3, max_value=5.0, callback=self._on_radius)
 			self.fov_slider = dpg.add_slider_float(label="FOV", default_value=self.cam.fov_deg, min_value=30.0, max_value=100.0, callback=self._on_fov)
 			self.size_slider = dpg.add_slider_int(label="Render Height (px)", default_value=self.H, min_value=200, max_value=1600, callback=self._on_resize_height)
+			self.bg_checkbox = dpg.add_checkbox(label="White background", default_value=True, callback=self._on_toggle_white_bg)
 			dpg.add_button(label="Screenshot", callback=self._on_screenshot)
 			dpg.add_text(default_value=f"Device: {self.device}")
 			# checkpoint dropdown if a directory was provided
@@ -445,6 +448,14 @@ class ViewerApp:
 				self._recreate_texture_and_draw()
 			except Exception:
 				self._recreate_texture_and_draw()
+
+	def _on_toggle_white_bg(self, s, a):
+		try:
+			self.white_bg = bool(a)
+			self.needs_redraw = True
+			self._invalidate_psnr()
+		except Exception:
+			pass
 
 	def _on_select_view(self, s, a):
 		# a may be label like "12 (IMG_0123.jpg)"; resolve to index
@@ -870,7 +881,7 @@ class ViewerApp:
 			elif self.base_H > 0 and num_rays % self.base_H == 0:
 				Ht_exp, Wt_exp = self.base_H, num_rays // self.base_H
 		# render at inferred H,W
-		rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size)
+		rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
 		# if inferred dims differ from base dims, adapt base frame accordingly
 		if (Ht_exp, Wt_exp) != (self.base_H, self.base_W):
 			frame_base = torch.cat([rgb, torch.ones(Ht_exp, Wt_exp, 1, device=rgb.device)], dim=-1)

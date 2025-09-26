@@ -289,7 +289,7 @@ class NeuralPrimitiveScene(nn.Module):
         dist_vec = torch.stack([dx_m, dy_m, dz_m], dim=-1)
         return ray_ids, prim_ids, t_m, dist_vec, seg_len, offsets, ray_d
 
-    def forward(self, ray_o, ray_d, score_threshold=1e-4):
+    def forward(self, ray_o, ray_d, score_threshold=1e-4, bg_color=None):
         B = ray_o.shape[0]
         device = ray_o.device
 
@@ -332,6 +332,17 @@ class NeuralPrimitiveScene(nn.Module):
 
         out = torch.zeros(B, 3, device=device)
         out.index_add_(0, ray_ids, weights * rgb_m)
+
+        # Optional background compositing: add remaining transmittance onto bg_color
+        if bg_color is not None:
+            if not torch.is_tensor(bg_color):
+                bg_color = torch.tensor(bg_color, dtype=out.dtype, device=device)
+            if bg_color.numel() == 1:
+                bg_color = bg_color.repeat(3)
+            # sum of weights per ray gives accumulated opacity
+            sum_w = torch.zeros(B, 1, device=device)
+            sum_w.index_add_(0, ray_ids, weights)
+            out = out + (1.0 - sum_w).clamp(0.0, 1.0) * bg_color.view(1, 3)
 
         with torch.no_grad():
             a_sum = alpha.squeeze(-1)

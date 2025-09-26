@@ -144,7 +144,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         rays_o = rays_o.to(device).view(-1, 3)
         rays_d = rays_d.to(device).view(-1, 3)
 
-        batch_size = 5000
+        batch_size = 2500
         pred_depth_chunks = []
         for i in range(0, rays_o.shape[0], batch_size):
             chunk_depth = scene.forward_depth(
@@ -160,27 +160,58 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         H, W = 260, 390
         pred_depth_img = pred_depth.view(H, W).cpu().numpy()
 
+
+        rays_o, rays_d, rgbs, pose = dataset[img_idx]
+        rays_o = rays_o.to(device).view(-1, 3)
+        rays_d = rays_d.to(device).view(-1, 3)
+        gt_rgb = rgbs.to(device).view(-1, 3)
+
+        # ---------------- Predict in batches ----------------
+        batch_size = 5000
+        pred_rgb_chunks = []
+        for i in range(0, rays_o.shape[0], batch_size):
+            chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
+            pred_rgb_chunks.append(chunk_pred)
+            del chunk_pred
+            torch.cuda.empty_cache()
+
+        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
+        del pred_rgb_chunks
+
+        #print('invalid num ', scene.invalid_nums)
+
+        # ---------------- Reshape & compute PSNR ----------------
+        #pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
+        #gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
+
+        pred_img = pred_rgb.view(1, 260, 390, 3).clamp(0, 1)
         # 可视化 Depth (固定范围 0–5)
         if img_idx == 0:
-            fig_depth, ax_depth = plt.subplots(1, 1, figsize=(6, 5))
+            fig_depth, axes = plt.subplots(1, 2, figsize=(12, 5))
+            ax_depth = axes[0]
             depth_img_artist = ax_depth.imshow(
                 pred_depth_img,
                 cmap="winter",   # 你可以换成 viridis / plasma / cividis
-                vmin=0.0,         # 最小深度
-                vmax=5.0          # 最大深度
+                # vmin=0.0,         # 最小深度
+                # vmax=5.0          # 最大深度
             )
             ax_depth.set_title("Predicted Depth")
             plt.colorbar(depth_img_artist, ax=ax_depth)
+            ax_rgb = axes[1]
+            rgb_img_artist = ax_rgb.imshow(pred_img[0].numpy())
+            ax_rgb.set_title("Predicted RGB")
             plt.tight_layout()
             plt.ion()
             plt.show()
         else:
             depth_img_artist.set_data(pred_depth_img)
+            rgb_img_artist.set_data(pred_img[0].numpy())
             fig_depth.canvas.draw()
             fig_depth.canvas.flush_events()
 
 
-    plt.pause(1)
+        plt.waitforbuttonpress()
+    # plt.pause(10)
 
 
 
