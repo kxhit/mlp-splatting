@@ -52,7 +52,7 @@ def collect_leaf_info(node, use_centroid=True):
         results.extend(collect_leaf_info(c, use_centroid))
     return results
 
-def octree_sample(points, min_points=15, device="cpu"):
+def octree_sample(points, min_points=40, device="cpu"):
     """Sample from point cloud and return (positions, radii)"""
     root = build_octree(points, min_points=min_points)
     leaf_info = collect_leaf_info(root, use_centroid=True)

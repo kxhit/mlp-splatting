@@ -17,13 +17,14 @@ def strip_orig_mod_prefix(state_dict):
 if __name__ == "__main__":
     # Path to dataset (change to your own scene path)
     #data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bicycle"
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
+    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/room"
     # Path to trained model checkpoint
     #model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_025504_67a196c4/scene_epoch_100000.pt"
     
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_004540_b6d99f62/scene_epoch_100000.pt"
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250922_120437_989740b2/scene_epoch_500000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250926_203723_6024d5dd//scene_epoch_500000.pt"
     #model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250922_233544_71123b7b/scene_epoch_500000.pt"   #this is bicycle
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250927_143857_1a727be7/scene_epoch_500000.pt"   #this is room
     
     # Load model checkpoint (CPU map by default)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None
@@ -53,7 +54,7 @@ if __name__ == "__main__":
         model_ckpt=model_ckpt, 
         block=True, 
         mlp_idx=mlp_idx, 
-        N=10786
+        N=9407
     )
 
 

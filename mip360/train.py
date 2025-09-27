@@ -99,6 +99,11 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     # train loop
     for epoch in tqdm(range(num_epochs)):
 
+        if torch.rand(1, device=device) < 0.5:
+            bg_color = torch.tensor([0.0, 0.0, 0.0], device=device)
+        else:
+            bg_color = torch.tensor([1.0, 1.0, 1.0], device=device)
+
         # Update learning rates
         #mlp_lr = get_mlp_lr(epoch, max_steps=num_epochs)
         #position_lr = get_position_lr(epoch, warmup_steps=500, max_steps=num_epochs)
@@ -136,7 +141,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         """
 
         optimizer.zero_grad()                       # 1. Clear gradients
-        pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3)    # 2. Forward pass
+        pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
         loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
         loss.backward()                             # 4. Backpropagation
 
@@ -145,9 +150,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         #print("Position grad norm:", scene.positions.grad.norm().item())
         #with torch.no_grad():
             #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
-
         optimizer.step()                            # 5. Update parameters
-
 
         # Accumulate loss
         loss_accum += loss.item()
