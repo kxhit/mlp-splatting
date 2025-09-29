@@ -438,7 +438,14 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
         focal_x = proj_matrix[0, 0] * W / 2.0
         focal_y = proj_matrix[1, 1] * H / 2.0
         focal = (focal_x + focal_y) * 0.5
-        pixel_radius = scales / (depth + 1e-8) * focal * 3.0 # 3-sigma guard band
+
+        # Derive radius from score threshold, similar to the Triton kernel logic
+        # sc = exp(-0.5 * perp2 / s^2) > score_threshold
+        # -> perp2 < -2 * s^2 * log(score_threshold)
+        # -> perp < s * sqrt(-2 * log(score_threshold))
+        radius_multiplier = torch.sqrt(-2.0 * torch.log(torch.tensor(score_threshold, device=device)))
+        world_radius = scales * radius_multiplier
+        pixel_radius = world_radius / (depth + 1e-8) * focal
 
         # Project centers to screen
         pos_clip = pos_view_h @ proj_matrix.T
