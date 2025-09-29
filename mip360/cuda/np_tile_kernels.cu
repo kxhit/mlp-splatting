@@ -34,18 +34,18 @@ __device__ __forceinline__ bool hit_and_features(
   const float vz = cz - roz;
   t = fmaf(vx, rdx, fmaf(vy, rdy, vz * rdz));
   if (t <= 0.f) return false;
-  
+
   const float px = rox + t * rdx;
   const float py = roy + t * rdy;
   const float pz = roz + t * rdz;
   dx = cx - px; dy = cy - py; dz = cz - pz; // center - foot
-  
+
   const float perp2 = fmaxf(dx*dx + dy*dy + dz*dz, 0.f);
   const float s = __expf(logs);
   const float s2 = s*s;
   const float score = __expf(-0.5f * perp2 / (s2 + 1e-12f));
   if (score <= thr) return false;
-  
+
   decay = __expf(- perp2 / (2.f * s2 + 1e-12f));
   return true;
 }
@@ -81,7 +81,7 @@ __global__ void render_tiles_kernel_with_sort(
   const int x = tile_x * TW + threadIdx.x;
   const int y = tile_y * TH + threadIdx.y;
   if (x >= Wimg || y >= Himg) return;
-  
+
   const int pix = y * Wimg + x;
   const int tile_id = tile_y * ((Wimg + TW - 1)/TW) + tile_x;
 
@@ -225,7 +225,7 @@ __global__ void render_tiles_kernel_with_sort(
     const float sigma = sigma_raw * decay;
     const float alpha = 1.f - __expf(-sigma);
     const float w = trans * alpha;
-    
+
     const float R = fast_sigmoid(o3);
     const float G = fast_sigmoid(o4);
     const float Bc = fast_sigmoid(o5);
@@ -242,8 +242,107 @@ __global__ void render_tiles_kernel_with_sort(
   out_alpha[pix]   = 1.f - trans;
 }
 
-// Host binding
-std::tuple<torch::Tensor, torch::Tensor> render_tiles_single_pass(
+
+class RenderTilesCUDASinglePass : public torch::autograd::Function<RenderTilesCUDASinglePass> {
+public:
+    static torch::autograd::variable_list forward(
+        torch::autograd::AutogradContext *ctx,
+        torch::Tensor rays_o,
+        torch::Tensor rays_d,
+        torch::Tensor positions,
+        torch::Tensor log_scales,
+        torch::Tensor culled_prim_indices,
+        torch::Tensor tile_offsets,
+        torch::Tensor freq_bands,
+        torch::Tensor attenuation,
+        torch::Tensor W1, torch::Tensor b1,
+        torch::Tensor W2, torch::Tensor b2,
+        torch::Tensor W3, torch::Tensor b3,
+        int64_t Wimg, int64_t Himg,
+        int64_t TW, int64_t TH,
+        double threshold)
+    {
+        // For now, we don't save any tensors for backward.
+        // ctx->save_for_backward({ ... });
+
+        TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+        TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+        TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+        TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==1);
+        TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+        TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+        TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+        TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+
+        const int64_t B = rays_o.size(0);
+        TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+
+        const int64_t N = positions.size(0);
+        const int64_t Hh = W2.size(1);
+        const int64_t IN = W1.size(2);
+        const int64_t F = freq_bands.size(0);
+        TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+
+        auto opts_f = rays_o.options().dtype(at::kFloat);
+        auto rgb = torch::zeros({B, 3}, opts_f);
+        auto alpha = torch::zeros({B, 1}, opts_f);
+
+        dim3 block((unsigned)TW, (unsigned)TH, 1);
+        dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+        render_tiles_kernel_with_sort<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+            rays_o.data_ptr<float>(),
+            rays_d.data_ptr<float>(),
+            positions.data_ptr<float>(),
+            log_scales.data_ptr<float>(),
+            culled_prim_indices.data_ptr<int32_t>(),
+            tile_offsets.data_ptr<int32_t>(),
+            freq_bands.data_ptr<float>(),
+            attenuation.data_ptr<float>(),
+            (int)F,
+            W1.data_ptr<float>(), b1.data_ptr<float>(),
+            W2.data_ptr<float>(), b2.data_ptr<float>(),
+            W3.data_ptr<float>(), b3.data_ptr<float>(),
+            (int)N, (int)Hh, (int)IN,
+            (int)Wimg, (int)Himg, (int)TW, (int)TH,
+            (float)threshold,
+            rgb.data_ptr<float>(), alpha.data_ptr<float>());
+        AT_CUDA_CHECK(cudaGetLastError());
+
+        return {rgb, alpha};
+    }
+
+    static torch::autograd::variable_list backward(
+        torch::autograd::AutogradContext *ctx,
+        torch::autograd::variable_list grad_outputs)
+    {
+        // Placeholder: return null gradients for all inputs that require grad.
+        // The order must match the inputs to forward().
+        return {
+            torch::Tensor(), // rays_o (doesn't require grad)
+            torch::Tensor(), // rays_d (doesn't require grad)
+            torch::Tensor(), // positions
+            torch::Tensor(), // log_scales
+            torch::Tensor(), // culled_prim_indices (doesn't require grad)
+            torch::Tensor(), // tile_offsets (doesn't require grad)
+            torch::Tensor(), // freq_bands (doesn't require grad)
+            torch::Tensor(), // attenuation (doesn't require grad)
+            torch::Tensor(), // W1
+            torch::Tensor(), // b1
+            torch::Tensor(), // W2
+            torch::Tensor(), // b2
+            torch::Tensor(), // W3
+            torch::Tensor(), // b3
+            torch::Tensor(), // Wimg (doesn't require grad)
+            torch::Tensor(), // Himg (doesn't require grad)
+            torch::Tensor(), // TW (doesn't require grad)
+            torch::Tensor(), // TH (doesn't require grad)
+            torch::Tensor()  // threshold (doesn't require grad)
+        };
+    }
+};
+
+// Wrapper function to be exposed to Python
+std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
     torch::Tensor positions,
@@ -259,51 +358,14 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_single_pass(
     int64_t TW, int64_t TH,
     double threshold)
 {
-  TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
-  TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
-  TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
-  TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==1);
-  TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
-  TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
-  TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
-  TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
-
-  const int64_t B = rays_o.size(0);
-  TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
-
-  const int64_t N = positions.size(0);
-  const int64_t Hh = W2.size(1);
-  const int64_t IN = W1.size(2);
-  const int64_t F = freq_bands.size(0);
-  TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
-
-  auto opts_f = rays_o.options().dtype(at::kFloat);
-  auto rgb = torch::zeros({B, 3}, opts_f);
-  auto alpha = torch::zeros({B, 1}, opts_f);
-
-  dim3 block((unsigned)TW, (unsigned)TH, 1);
-  dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
-  render_tiles_kernel_with_sort<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>( 
-      rays_o.data_ptr<float>(),
-      rays_d.data_ptr<float>(),
-      positions.data_ptr<float>(),
-      log_scales.data_ptr<float>(),
-      culled_prim_indices.data_ptr<int32_t>(),
-      tile_offsets.data_ptr<int32_t>(),
-      freq_bands.data_ptr<float>(),
-      attenuation.data_ptr<float>(),
-      (int)F,
-      W1.data_ptr<float>(), b1.data_ptr<float>(),
-      W2.data_ptr<float>(), b2.data_ptr<float>(),
-      W3.data_ptr<float>(), b3.data_ptr<float>(),
-      (int)N, (int)Hh, (int)IN,
-      (int)Wimg, (int)Himg, (int)TW, (int)TH,
-      (float)threshold,
-      rgb.data_ptr<float>(), alpha.data_ptr<float>());
-  AT_CUDA_CHECK(cudaGetLastError());
-  return {rgb, alpha};
+    auto result = RenderTilesCUDASinglePass::apply(
+        rays_o, rays_d, positions, log_scales, culled_prim_indices, tile_offsets,
+        freq_bands, attenuation, W1, b1, W2, b2, W3, b3,
+        Wimg, Himg, TW, TH, threshold);
+    return {result[0], result[1]};
 }
 
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("render_tiles_single_pass", &render_tiles_single_pass, "Tile single-pass MLP splatting");
+  m.def("render_tiles_autograd", &render_tiles_autograd_wrapper, "Tile single-pass MLP splatting (autograd ready)");
 }

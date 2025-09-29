@@ -410,7 +410,6 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             _tile_ext = load_ext(name='np_tile_kernels', sources=[_tile_src_path], verbose=False)
         return _tile_ext
 
-    @torch.no_grad()
     def forward(self, ray_o, ray_d, score_threshold=1e-4, bg_color=None, view_matrix=None, proj_matrix=None):
         if self.image_size is None:
             raise ValueError("image_size must be set on NeuralPrimitiveSceneTileCUDA before calling forward.")
@@ -506,7 +505,7 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
 
         ray_d_n = F.normalize(ray_d, dim=-1)
 
-        rgb, alpha = ext.render_tiles_single_pass(
+        rgb, alpha = ext.render_tiles_autograd(
             ray_o.contiguous(), ray_d_n.contiguous(),
             self.positions.contiguous(), self.log_scales.squeeze(-1).contiguous(),
             culled_prim_indices, tile_offsets.to(torch.int32),
