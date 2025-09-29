@@ -43,6 +43,7 @@ def parse_args():
 	parser.add_argument("--data_dir", type=str, default="")
 	parser.add_argument("--factor", type=int, default=8)
 	parser.add_argument("--llffhold", type=int, default=8)
+	parser.add_argument("--engine", type=str, default=os.environ.get("MLPSP_ENGINE", "legacy"), choices=["legacy", "cuda", "tile_cuda"], help="Rendering engine: legacy (vmodel), cuda (two-pass selection), or tile_cuda (single-pass tile)")
 	return parser.parse_args()
 
 
@@ -66,7 +67,7 @@ class ViewerApp:
 				raise FileNotFoundError(f"No .pt files found in directory: {args.ckpt}")
 		else:
 			self.selected_ckpt_path = args.ckpt
-		self.scene = build_scene_from_ckpt(self.selected_ckpt_path, self.device)
+		self.scene = build_scene_from_ckpt(self.selected_ckpt_path, self.device, engine=self.args.engine)
 
 		self.W = args.width
 		self.H = args.height
@@ -75,7 +76,10 @@ class ViewerApp:
 		self.base_W = int(self.W)
 		self.base_H = int(self.H)
 		self.cam = OrbitCamera(self.base_W, self.base_H, fov_deg=args.fov)
-		self.last_time = time.time()
+		self.last_render_time = time.time()
+		self.last_fps_time = time.time()
+		self.frame_count_for_fps = 0
+		self.fps_text = None
 		self.needs_redraw = True
 		self.dragging = False
 		self.last_mouse = (0, 0)
@@ -168,6 +172,7 @@ class ViewerApp:
 			self.size_slider = dpg.add_slider_int(label="Render Height (px)", default_value=self.H, min_value=200, max_value=1600, callback=self._on_resize_height)
 			self.bg_checkbox = dpg.add_checkbox(label="White background", default_value=True, callback=self._on_toggle_white_bg)
 			dpg.add_button(label="Screenshot", callback=self._on_screenshot)
+			self.fps_text = dpg.add_text("FPS: 0.0")
 			dpg.add_text(default_value=f"Device: {self.device}")
 			# checkpoint dropdown if a directory was provided
 			if self.ckpt_dir is not None and self.ckpt_items:
@@ -778,6 +783,19 @@ class ViewerApp:
 					pass
 		return c2w_used
 
+	def _build_projection_matrix(self, near=0.001, far=100.0):
+		fov_rad = math.radians(self.cam.fov_deg)
+		aspect = self.cam.width / self.cam.height
+		t = math.tan(fov_rad / 2.0)
+		r = t * aspect
+		P = torch.zeros(4, 4)
+		P[0, 0] = 1.0 / r
+		P[1, 1] = 1.0 / t
+		P[2, 2] = -(far + near) / (far - near)
+		P[3, 2] = 1.0
+		P[2, 3] = -(2 * far * near) / (far - near)
+		return P
+
 	def _on_mouse_click(self, s, a):
 		# Left-click handler; perform exclusion toggle when enabled and overlay visible with Ctrl pressed
 		# Any click over render invalidates PSNR immediately
@@ -881,7 +899,25 @@ class ViewerApp:
 			elif self.base_H > 0 and num_rays % self.base_H == 0:
 				Ht_exp, Wt_exp = self.base_H, num_rays // self.base_H
 		# render at inferred H,W
-		rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
+		if self.args.engine == 'tile_cuda':
+			# tile_cuda engine requires view/proj matrices and full image render
+			c2w_h = torch.cat([c2w_used, torch.tensor([[0,0,0,1]], device=c2w_used.device, dtype=c2w_used.dtype)], dim=0)
+			view_matrix = torch.inverse(c2w_h)
+			proj_matrix = self._build_projection_matrix().to(self.device)
+
+			if hasattr(self.scene, 'set_image_size'):
+				self.scene.set_image_size(Wt_exp, Ht_exp)
+				
+			bg_color_val = 1.0 if self.white_bg else 0.0
+			rgb = self.scene(
+				rays_o, 
+				rays_d, 
+				bg_color=bg_color_val,
+				view_matrix=view_matrix,
+				proj_matrix=proj_matrix
+			).view(Ht_exp, Wt_exp, 3)
+		else:
+			rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
 		# if inferred dims differ from base dims, adapt base frame accordingly
 		if (Ht_exp, Wt_exp) != (self.base_H, self.base_W):
 			frame_base = torch.cat([rgb, torch.ones(Ht_exp, Wt_exp, 1, device=rgb.device)], dim=-1)
@@ -981,11 +1017,22 @@ class ViewerApp:
 	def run(self):
 		while dpg.is_dearpygui_running():
 			now = time.time()
-			# aim ~3-5 FPS when interacting, otherwise show last frame
-			if self.needs_redraw or (now - self.last_time) > (1.0 / 3.0):
+
+			# FPS calculation
+			self.frame_count_for_fps += 1
+			if (now - self.last_fps_time) > 0.5:
+				fps = self.frame_count_for_fps / (now - self.last_fps_time)
+				if self.fps_text:
+					dpg.set_value(self.fps_text, f"FPS: {fps:.1f}")
+				self.last_fps_time = now
+				self.frame_count_for_fps = 0
+
+			# Redraw logic
+			if self.needs_redraw or (now - self.last_render_time) > (1.0 / 3.0):
 				self._render_once()
-				self.last_time = now
+				self.last_render_time = now
 				self.needs_redraw = False
+			
 			dpg.render_dearpygui_frame()
 
 		dpg.destroy_context()

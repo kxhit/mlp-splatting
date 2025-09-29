@@ -10,6 +10,16 @@ def render_scene(scene, rays_o: torch.Tensor, rays_d: torch.Tensor, H: int, W: i
 
     preds = []
     bg = (1.0, 1.0, 1.0) if bg_white else (0.0, 0.0, 0.0)
+    # Provide image size hint to engines that need full-frame context
+    try:
+        if hasattr(scene, 'set_image_size'):
+            scene.set_image_size(W, H)
+    except Exception:
+        pass
+    # For tile engines, run as a single full-frame pass
+    if getattr(scene, 'requires_full_image', False):
+        out = scene(rays_o, rays_d, bg_color=bg)
+        return out.clamp(0, 1).reshape(H, W, 3).contiguous()
     for i in range(0, rays_o.shape[0], batch_size):
         preds.append(scene(
             rays_o[i:i+batch_size],

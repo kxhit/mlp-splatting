@@ -147,7 +147,7 @@ class OrbitCamera:
             axis_n = axis / (axis.norm() + 1e-8)
             c = math.cos(angle)
             s = math.sin(angle)
-            return vec * c + torch.cross(axis_n, vec) * s + axis_n * torch.dot(axis_n, vec) * (1.0 - c)
+            return vec * c + torch.linalg.cross(axis_n, vec) * s + axis_n * torch.dot(axis_n, vec) * (1.0 - c)
 
         self.control_up = rotate_vec(self.control_up, forward, float(delta_rad))
         self.control_up = self.control_up / (self.control_up.norm() + 1e-8)
