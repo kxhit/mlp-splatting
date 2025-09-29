@@ -193,7 +193,6 @@ class IndexedMLP(nn.Module):
         return rgb, sigma
 
 
-
 # ============================================================
 # Scene
 # ============================================================
@@ -423,6 +422,8 @@ class NeuralPrimitiveScene(nn.Module):
 
         depth = torch.zeros(B, 1, device=device)
         depth.index_add_(0, ray_ids, weights * depth_m)
+        rgb = torch.zeros(B, 3, device=device)
+        rgb.index_add_(0, ray_ids, weights * rgb_m)
 
-        return depth
+        return rgb, depth
 

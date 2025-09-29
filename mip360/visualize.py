@@ -144,47 +144,30 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
         rays_o, rays_d, rgbs, pose = dataset[img_idx]
         rays_o = rays_o.to(device).view(-1, 3)
         rays_d = rays_d.to(device).view(-1, 3)
+        gt_rgb = rgbs.to(device).view(-1, 3)
 
         batch_size = 2500
         pred_depth_chunks = []
+        pred_rgb_chunks = []
         for i in range(0, rays_o.shape[0], batch_size):
-            chunk_depth = scene.forward_depth(
+            chunk_rgb, chunk_depth = scene.forward_depth(
                 rays_o[i:i+batch_size],
                 rays_d[i:i+batch_size],
                 pose.to(device)   # T_cw
-            ).cpu()
+            )
+            chunk_rgb = chunk_rgb.cpu()
+            chunk_depth = chunk_depth.cpu()
             pred_depth_chunks.append(chunk_depth)
+            pred_rgb_chunks.append(chunk_rgb)
             del chunk_depth
+            del chunk_rgb
             torch.cuda.empty_cache()
 
         pred_depth = torch.cat(pred_depth_chunks, dim=0)
+        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
         H, W = 259, 389
         pred_depth_img = pred_depth.view(H, W).cpu().numpy()
 
-
-        rays_o, rays_d, rgbs, pose = dataset[img_idx]
-        rays_o = rays_o.to(device).view(-1, 3)
-        rays_d = rays_d.to(device).view(-1, 3)
-        gt_rgb = rgbs.to(device).view(-1, 3)
-
-        # ---------------- Predict in batches ----------------
-        batch_size = 5000
-        pred_rgb_chunks = []
-        for i in range(0, rays_o.shape[0], batch_size):
-            chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
-            #chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size], bg_color=torch.tensor([1.0, 1.0, 1.0],device="cuda")).cpu()  # move to CPU immediately
-            pred_rgb_chunks.append(chunk_pred)
-            del chunk_pred
-            torch.cuda.empty_cache()
-
-        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
-        del pred_rgb_chunks
-
-        #print('invalid num ', scene.invalid_nums)
-
-        # ---------------- Reshape & compute PSNR ----------------
-        #pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
-        #gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
 
         pred_img = pred_rgb.view(1, H, W, 3).clamp(0, 1)
         gt_img = gt_rgb.cpu().view(1, H, W, 3)
@@ -196,9 +179,9 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
             ax_depth = axes[0]
             depth_img_artist = ax_depth.imshow(
                 pred_depth_img,
-                cmap="winter",   # 你可以换成 viridis / plasma / cividis
-                vmin=0.0,         # 最小深度
-                vmax=7.0          # 最大深度
+                cmap="jet",   # 你可以换成 viridis / plasma / cividis
+                #vmin=0.0,         # 最小深度
+                #vmax=7.0          # 最大深度
             )
             ax_depth.set_title("Predicted Depth")
             plt.colorbar(depth_img_artist, ax=ax_depth)
@@ -215,7 +198,7 @@ def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', blo
             fig_depth.canvas.flush_events()
 
 
-        #plt.waitforbuttonpress()
+        plt.waitforbuttonpress()
     # plt.pause(10)
     print("Average PSNR:", total / len(dataset))
 

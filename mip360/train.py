@@ -99,10 +99,7 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     # train loop
     for epoch in tqdm(range(num_epochs)):
 
-        if torch.rand(1, device=device) < 0.5:
-            bg_color = torch.tensor([0.0, 0.0, 0.0], device=device)
-        else:
-            bg_color = torch.tensor([1.0, 1.0, 1.0], device=device)
+        bg_color = torch.rand(3, device=device)
 
         # Update learning rates
         #mlp_lr = get_mlp_lr(epoch, max_steps=num_epochs)
