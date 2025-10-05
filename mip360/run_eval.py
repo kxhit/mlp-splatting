@@ -24,7 +24,7 @@ if __name__ == "__main__":
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250918_004540_b6d99f62/scene_epoch_100000.pt"
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250926_203723_6024d5dd//scene_epoch_500000.pt"
     #model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250922_233544_71123b7b/scene_epoch_500000.pt"   #this is bicycle
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250927_143857_1a727be7/scene_epoch_500000.pt"   #this is room
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/20250928_162800_331d34d5/scene_epoch_500000.pt"   #this is room
     
     # Load model checkpoint (CPU map by default)
     model_ckpt = torch.load(model_ckpt_path, map_location='cpu') if model_ckpt_path else None

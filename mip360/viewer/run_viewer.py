@@ -39,7 +39,7 @@ def parse_args():
 	parser.add_argument("--height", type=int, default=600)
 	parser.add_argument("--fov", type=float, default=60.0)
 	parser.add_argument("--device", type=str, default="cuda")
-	parser.add_argument("--batch_size", type=int, default=60000)
+	parser.add_argument("--batch_size", type=int, default=100000)
 	parser.add_argument("--data_dir", type=str, default="")
 	parser.add_argument("--factor", type=int, default=8)
 	parser.add_argument("--llffhold", type=int, default=8)
