@@ -16,7 +16,7 @@ if __name__ == "__main__":
     set_seed(2025)
     #torch.set_float32_matmul_precision('high')
     #data_dir = "/home/xin/data/nerf/nerf_example_data/nerf_llff_data/fern"
-    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/room"
-    train_scene_llff(data_dir, num_epochs=500000, batch_size=3000, initial_num_primitives=9407)
+    data_dir = "/home/yuzhou/Desktop/datasets/360_v2/bonsai"
+    train_scene_llff(data_dir, num_epochs=800000, batch_size=12000, initial_num_primitives=2183)
     
 

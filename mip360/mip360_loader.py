@@ -8,7 +8,7 @@ from utils.read_write_model import read_images_binary, read_cameras_binary, read
 
 
 class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=8, llffhold=8, split='train'):
+    def __init__(self, basedir, factor=4, llffhold=8, split='train'):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
         self.llffhold = llffhold
