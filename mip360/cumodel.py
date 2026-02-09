@@ -43,6 +43,23 @@ except Exception as e:  # noqa: BLE001
     _tile_ext = None
     _tile_error = str(e)
 
+# Optional: cooperative splat tile-based renderer extension (loaded on demand)
+_splattile_ext = None
+_splattile_error = None
+try:
+    from torch.utils.cpp_extension import load as load_ext
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+    splattile_src = os.path.join(this_dir, 'cuda', 'np_splattile_kernels.cu')
+    if os.path.exists(splattile_src):
+        # Delay actual compilation until first use to keep import fast
+        _splattile_src_path = splattile_src
+    else:
+        _splattile_error = f'Splat Tile CUDA source missing at {splattile_src}'
+        _splattile_src_path = None
+except Exception as e:  # noqa: BLE001
+    _splattile_ext = None
+    _splattile_error = str(e)
+
 
 class IntegratedPositionalEncoding(nn.Module):
     def __init__(self, in_dim=6, num_frequencies=10, sigma=0.01):
@@ -480,14 +497,37 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
         overlap_matrix = overlap_x & overlap_y & in_front.unsqueeze(0)
 
         # Convert overlap matrix to sorted sparse format for kernel
+        # Tile traversal mode:
+        # - per_pixel (default): per-pixel hit-list + per-pixel depth sort (exact within MAX_INTERSECTIONS)
+        # - tilecenter: tile-level approximate ordering (tile-center ray) + prim-major traversal (in-kernel per-tile sort)
+        # - globaldepth: tile-level approximate ordering using each primitive center's camera-space forward (view-space z),
+        #                but sorting is performed OUTSIDE the kernel. Kernel assumes per-tile lists are already ordered.
+        tile_order_mode = os.environ.get("MLPSP_TILE_ORDER", "per_pixel").strip().lower()
+        use_tilecenter = tile_order_mode in {"tilecenter", "tile_center", "tile-center"}
+        use_globaldepth = tile_order_mode in {"globaldepth", "global_depth", "global-depth", "globalz", "global_z", "global-z"}
+
         tile_prim_pairs = overlap_matrix.nonzero(as_tuple=False)
         if tile_prim_pairs.numel() == 0:
             # Handle case with no intersections
             culled_prim_indices = torch.empty(0, dtype=torch.int32, device=device)
             tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.int32, device=device)
         else:
-            # Sort pairs by tile_id
-            sorted_indices = torch.argsort(tile_prim_pairs[:, 0])
+            # Sort pairs:
+            # - default: by tile_id only (tile lists are NOT ordered internally)
+            # - globaldepth: by (tile_id, global depth rank) so each tile's list is already ordered
+            if use_globaldepth:
+                # Build a global rank based on primitive center camera-space forward (view-space z).
+                # Smaller depth = closer => front-to-back traversal (matches transmittance accumulation).
+                prim_order = torch.argsort(depth)  # ascending
+                prim_rank = torch.empty(N, dtype=torch.int32, device=device)
+                prim_rank[prim_order] = torch.arange(N, device=device, dtype=torch.int32)
+
+                pair_ranks = prim_rank[tile_prim_pairs[:, 1]]
+                key = (tile_prim_pairs[:, 0].to(torch.int64) << 32) | pair_ranks.to(torch.int64)
+                sorted_indices = torch.argsort(key)
+            else:
+                # Sort pairs by tile_id
+                sorted_indices = torch.argsort(tile_prim_pairs[:, 0])
             sorted_pairs = tile_prim_pairs[sorted_indices]
             
             tile_ids = sorted_pairs[:, 0]
@@ -512,7 +552,14 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
 
         ray_d_n = F.normalize(ray_d, dim=-1)
 
-        rgb, alpha = ext.render_tiles_autograd(
+        if use_globaldepth:
+            render_fn = ext.render_tiles_autograd_tilecenter_presorted
+        elif use_tilecenter:
+            render_fn = ext.render_tiles_autograd_tilecenter
+        else:
+            render_fn = ext.render_tiles_autograd
+
+        rgb, alpha = render_fn(
             ray_o.contiguous(), ray_d_n.contiguous(),
             self.positions.contiguous(), self.log_scales.squeeze(-1).contiguous(),
             culled_prim_indices, tile_offsets.to(torch.int32),
@@ -532,5 +579,100 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             if bg.numel() == 1:
                 bg = bg.repeat(3)
             rgb = rgb + (1.0 - alpha).clamp(0.0, 1.0) * bg.view(1, 3)
+
+        return rgb
+
+class NeuralPrimitiveSceneSplatTileCUDA(nn.Module):
+    """
+    Cooperative tile-based MLP splatting renderer.
+    - Culling, sorting, and rendering are all performed inside a single cooperative kernel.
+    - Takes camera parameters and resolution, generates rays internally.
+    """
+    requires_full_image = True
+
+    def __init__(self, num_primitives=1024, hidden_dim=16, pe_frequencies=10,
+                 initial_positions=None, use_integrated_pe=True):
+        super().__init__()
+        self.num_primitives = num_primitives
+        self.hidden_dim = hidden_dim
+        self.pe_frequencies = pe_frequencies
+        self.use_integrated_pe = use_integrated_pe
+
+        if initial_positions is None:
+            bound = 1.0
+            self.positions = nn.Parameter(torch.rand(num_primitives, 3) * 2 * bound - bound)
+            sampled_scales = torch.ones(num_primitives) * 0.1
+        else:
+            sampled_positions, sampled_scales = octree_sample(initial_positions)
+            print("Sampled", len(sampled_positions), "initial positions from point cloud")
+            assert len(sampled_positions) == num_primitives
+            sampled_scales /= 10
+            self.positions = nn.Parameter(sampled_positions.clone().detach())
+
+        self.log_scales = nn.Parameter(torch.log(sampled_scales).unsqueeze(-1))
+
+        if use_integrated_pe:
+            self.encoder = IntegratedPositionalEncoding(in_dim=6, num_frequencies=pe_frequencies, sigma=0.01)
+        else:
+            self.encoder = FourierFeatureEncoding(in_dim=6, num_frequencies=pe_frequencies)
+
+        IN = self.encoder.out_dim
+        H = hidden_dim
+        OUT = 4
+        self.W1 = nn.Parameter(torch.randn(num_primitives, H, IN) * 0.01)
+        self.b1 = nn.Parameter(torch.zeros(num_primitives, H))
+        self.W2 = nn.Parameter(torch.randn(num_primitives, H, H) * 0.01)
+        self.b2 = nn.Parameter(torch.zeros(num_primitives, H))
+        self.W3 = nn.Parameter(torch.randn(num_primitives, OUT, H) * 0.01)
+        self.b3 = nn.Parameter(torch.zeros(num_primitives, OUT))
+
+        self.register_buffer("alpha_accum", torch.zeros(num_primitives))
+
+    def _ensure_splattile_ext(self):
+        global _splattile_ext
+        if _splattile_ext is None:
+            if _splattile_error is not None and _splattile_error.startswith('Splat Tile CUDA source missing'):
+                raise RuntimeError(_splattile_error)
+            if '_splattile_src_path' not in globals() or _splattile_src_path is None:
+                raise RuntimeError(f"Splat Tile CUDA not available: {_splattile_error}")
+            # JIT compile on first use
+            _splattile_ext = load_ext(name='np_splattile_kernels', sources=[_splattile_src_path], verbose=False)
+        return _splattile_ext
+
+    def forward(self, resolution, view_matrix, proj_matrix, camera_pos, score_threshold=1e-4, bg_color=None):
+        W, H = resolution
+        device = self.positions.device
+        
+        ext = self._ensure_splattile_ext()
+
+        if isinstance(self.encoder, IntegratedPositionalEncoding):
+            freq = self.encoder.freq_bands.to(device=device, dtype=torch.float32)
+            sigma2 = float(self.encoder.sigma2)
+            att = torch.exp(-0.5 * (freq * freq) * sigma2)
+        else:
+            freq = self.encoder.freq_bands.to(device=device, dtype=torch.float32)
+            att = torch.ones_like(freq)
+
+        rgb, alpha = ext.render_splattile_autograd(
+            view_matrix.contiguous(), proj_matrix.contiguous(), camera_pos.contiguous(),
+            int(W), int(H),
+            self.positions.contiguous(), self.log_scales.squeeze(-1).contiguous(),
+            self.W1.contiguous(), self.b1.contiguous(),
+            self.W2.contiguous(), self.b2.contiguous(),
+            self.W3.contiguous(), self.b3.contiguous(),
+            freq.contiguous(), att.contiguous(),
+            float(score_threshold)
+        )
+
+        if bg_color is not None:
+            if not torch.is_tensor(bg_color):
+                bg = torch.tensor(bg_color, dtype=rgb.dtype, device=rgb.device)
+            else:
+                bg = bg_color.to(rgb.device, dtype=rgb.dtype)
+            if bg.numel() == 1:
+                bg = bg.repeat(3)
+            # Reshape alpha to (H, W, 1) for broadcasting
+            alpha_reshaped = alpha.unsqueeze(-1)
+            rgb = rgb + (1.0 - alpha_reshaped).clamp(0.0, 1.0) * bg.view(1, 1, 3)
 
         return rgb

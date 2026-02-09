@@ -64,6 +64,17 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
                     sys.path.append(parent)
                 from cumodel import NeuralPrimitiveSceneTileCUDA as SceneImpl  # type: ignore
         # SceneCls = SceneImpl
+    elif engine == "splat_tile_cuda":
+        try:
+            from ..cumodel import NeuralPrimitiveSceneSplatTileCUDA as SceneImpl  # type: ignore
+        except Exception:
+            try:
+                from cumodel import NeuralPrimitiveSceneSplatTileCUDA as SceneImpl  # type: ignore
+            except Exception:
+                parent = os.path.dirname(os.path.dirname(__file__))
+                if parent not in sys.path:
+                    sys.path.append(parent)
+                from cumodel import NeuralPrimitiveSceneSplatTileCUDA as SceneImpl  # type: ignore
     else:
         try:
             from ..vmodel import NeuralPrimitiveScene as SceneImpl  # type: ignore
@@ -114,12 +125,12 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
     ).to(device)
 
     # Apply remap for tile engine to avoid unexpected/missing keys
-    if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA":
+    if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA" or SceneCls.__name__ == "NeuralPrimitiveSceneSplatTileCUDA":
         sd = _remap_for_tile(sd)
 
     missing, unexpected = scene.load_state_dict(sd, strict=False)
     # Ignore benign buffer differences for tile engine
-    if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA":
+    if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA" or SceneCls.__name__ == "NeuralPrimitiveSceneSplatTileCUDA":
         missing = [m for m in missing if m not in ("alpha_accum", "encoder.freq_bands")]
     if len(missing) > 0:
         print("[viewer] missing keys:", missing)

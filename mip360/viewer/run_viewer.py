@@ -3,6 +3,7 @@ import sys
 import time
 import argparse
 import math
+from contextlib import contextmanager
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -44,7 +45,28 @@ def parse_args():
 	parser.add_argument("--factor", type=int, default=8)
 	parser.add_argument("--llffhold", type=int, default=8)
 	parser.add_argument("--engine", type=str, default=os.environ.get("MLPSP_ENGINE", "legacy"), choices=["legacy", "cuda", "tile_cuda"], help="Rendering engine: legacy (vmodel), cuda (two-pass selection), or tile_cuda (single-pass tile)")
+	# Profiling / benchmarking helpers (Nsight-friendly)
+	parser.add_argument("--profile_nvtx", action="store_true", help="Add NVTX ranges and use cudaProfilerStart/Stop to bracket a capture window.")
+	parser.add_argument("--profile_warmup_frames", type=int, default=60, help="Number of rendered frames to skip before starting the capture window.")
+	parser.add_argument("--profile_frames", type=int, default=300, help="Number of rendered frames to include in the capture window.")
+	parser.add_argument("--exit_after_profile", action="store_true", help="Exit viewer after the profile capture window ends.")
 	return parser.parse_args()
+
+
+@contextmanager
+def _nvtx_range(msg: str, enabled: bool):
+	"""
+	Lightweight NVTX range wrapper (safe when NVTX is unavailable).
+	We keep it optional to avoid hard dependencies and to preserve portability.
+	"""
+	if enabled and torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+		try:
+			torch.cuda.nvtx.range_push(msg)
+			yield
+		finally:
+			torch.cuda.nvtx.range_pop()
+	else:
+		yield
 
 
 class ViewerApp:
@@ -52,6 +74,15 @@ class ViewerApp:
 		os.makedirs(args.output_dir, exist_ok=True)
 		self.args = args
 		self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+		# Profiling state (rendered-frames based, not GUI ticks)
+		self._rendered_frames = 0
+		self._profile_started = False
+		self._profile_done = False
+		self._profile_nvtx_window_open = False
+		self._profile_nvtx_enabled = bool(args.profile_nvtx) and (self.device.type == "cuda")
+		self._profile_warmup_frames = max(int(args.profile_warmup_frames), 0)
+		self._profile_frames = max(int(args.profile_frames), 0)
+		self._exit_after_profile = bool(args.exit_after_profile)
 		# checkpoint management (file or directory)
 		self.ckpt_dir = None
 		self.ckpt_items = []  # UI items (filenames)
@@ -858,31 +889,108 @@ class ViewerApp:
 		except Exception:
 			pass
 
+	def _finalize_profiling(self):
+		"""Best-effort close profiling ranges so Nsight can flush a report."""
+		# Close NVTX capture window if still open
+		if self._profile_nvtx_window_open and hasattr(torch.cuda, "nvtx"):
+			try:
+				torch.cuda.nvtx.range_pop()
+			except Exception:
+				pass
+			self._profile_nvtx_window_open = False
+
+		# Stop cudaProfiler if it was started
+		if self._profile_started and hasattr(torch.cuda, "profiler"):
+			try:
+				torch.cuda.profiler.stop()
+			except Exception:
+				pass
+
 	def _render_once(self):
-		# 1) Render base resolution with MLP
-		if self.use_dataset_pose and (self.dataset is not None) and (self.dataset_cam_idx is not None):
-			rays_o, rays_d = self._generate_rays_from_dataset_pose()
-			Ht_exp, Wt_exp = self.base_H, self.base_W
-			c2w_used = self.dataset.poses[self.dataset_cam_idx].to(self.device)
-		else:
-			# camera rays from interactive orbit camera
-			rays_o, rays_d = self.cam.generate_rays(self.device)
-			Ht_exp, Wt_exp = int(self.cam.height), int(self.cam.width)
-			c2w_used = self.cam.get_pose().to(self.device)
-			# If dataset normalization exists, map camera pose and rays to training (normalized) coords
-			if self.dataset is not None and hasattr(self.dataset, 'avg_position') and hasattr(self.dataset, 'scale'):
+		frame_idx = self._rendered_frames
+		profile_frame = (
+			self._profile_nvtx_enabled
+			and (not self._profile_done)
+			and (frame_idx >= self._profile_warmup_frames)
+			and (frame_idx < self._profile_warmup_frames + self._profile_frames)
+		)
+		last_profile_frame = (
+			self._profile_nvtx_enabled
+			and (self._profile_frames > 0)
+			and (frame_idx == self._profile_warmup_frames + self._profile_frames - 1)
+		)
+
+		# Optional: open/close a single NVTX range covering the whole capture window.
+		# This makes --capture-range=nvtx reliable without needing to match per-frame names.
+		if self._profile_nvtx_enabled and hasattr(torch.cuda, "nvtx"):
+			try:
+				if profile_frame and (not self._profile_nvtx_window_open):
+					torch.cuda.nvtx.range_push("viewer/profile_window")
+					self._profile_nvtx_window_open = True
+				elif self._profile_nvtx_window_open and last_profile_frame:
+					# Close after rendering the last frame in window (range_pop below after impl)
+					pass
+			except Exception:
+				pass
+
+		# Start/stop profiling window using cudaProfiler API (works well with Nsight)
+		if profile_frame and (not self._profile_started) and hasattr(torch.cuda, "profiler"):
+			try:
+				torch.cuda.profiler.start()
+				self._profile_started = True
+			except Exception:
+				pass
+
+		with _nvtx_range(f"viewer/frame_{frame_idx}", profile_frame):
+			self._render_once_impl(profile_frame=profile_frame, frame_idx=frame_idx)
+
+		# Close NVTX capture window range after last frame is rendered
+		if self._profile_nvtx_window_open and last_profile_frame and hasattr(torch.cuda, "nvtx"):
+			try:
+				torch.cuda.nvtx.range_pop()
+			except Exception:
+				pass
+			self._profile_nvtx_window_open = False
+
+		# Mark done after last frame regardless of cudaProfiler availability
+		if last_profile_frame:
+			self._profile_done = True
+
+		# End profiling window after the last captured frame (cudaProfiler API)
+		if self._profile_started and hasattr(torch.cuda, "profiler"):
+			if last_profile_frame:
 				try:
-					avg_np = self.dataset.avg_position
-					scale_val = float(self.dataset.scale)
-					avg = torch.tensor(avg_np, dtype=torch.float32, device=self.device)
-					# normalize ray origins: o' = scale * (o - avg)
-					rays_o = (rays_o - avg) * scale_val
-					# directions need no scaling (unit-length downstream) so keep as is
-					# normalize camera pose translation similarly
-					c2w_used = c2w_used.clone()
-					c2w_used[:3, 3] = (c2w_used[:3, 3] - avg) * scale_val
+					torch.cuda.profiler.stop()
 				except Exception:
 					pass
+
+	def _render_once_impl(self, profile_frame: bool, frame_idx: int):
+		# 1) Render base resolution with MLP
+		with _nvtx_range("viewer/generate_rays", profile_frame):
+			if self.use_dataset_pose and (self.dataset is not None) and (self.dataset_cam_idx is not None):
+				rays_o, rays_d = self._generate_rays_from_dataset_pose()
+				Ht_exp, Wt_exp = self.base_H, self.base_W
+				c2w_used = self.dataset.poses[self.dataset_cam_idx].to(self.device)
+			else:
+				# camera rays from interactive orbit camera
+				rays_o, rays_d = self.cam.generate_rays(self.device)
+				Ht_exp, Wt_exp = int(self.cam.height), int(self.cam.width)
+				c2w_used = self.cam.get_pose().to(self.device)
+				# If dataset normalization exists, map camera pose and rays to training (normalized) coords
+				if self.dataset is not None and hasattr(self.dataset, 'avg_position') and hasattr(self.dataset, 'scale'):
+					try:
+						avg_np = self.dataset.avg_position
+						scale_val = float(self.dataset.scale)
+						avg = torch.tensor(avg_np, dtype=torch.float32, device=self.device)
+						# normalize ray origins: o' = scale * (o - avg)
+						rays_o = (rays_o - avg) * scale_val
+						# directions need no scaling (unit-length downstream) so keep as is
+						# normalize camera pose translation similarly
+						c2w_used = c2w_used.clone()
+						c2w_used[:3, 3] = (c2w_used[:3, 3] - avg) * scale_val
+					except Exception:
+						pass
+
 		# guard against any mismatch between expected HxW and rays count
 		num_rays = int(rays_o.shape[0])
 		if Ht_exp * Wt_exp != num_rays:
@@ -898,26 +1006,31 @@ class ViewerApp:
 			# try factoring by base_H
 			elif self.base_H > 0 and num_rays % self.base_H == 0:
 				Ht_exp, Wt_exp = self.base_H, num_rays // self.base_H
+
 		# render at inferred H,W
 		if self.args.engine == 'tile_cuda':
 			# tile_cuda engine requires view/proj matrices and full image render
-			c2w_h = torch.cat([c2w_used, torch.tensor([[0,0,0,1]], device=c2w_used.device, dtype=c2w_used.dtype)], dim=0)
-			view_matrix = torch.inverse(c2w_h)
-			proj_matrix = self._build_projection_matrix().to(self.device)
+			with _nvtx_range("viewer/tile_cuda_setup", profile_frame):
+				c2w_h = torch.cat([c2w_used, torch.tensor([[0,0,0,1]], device=c2w_used.device, dtype=c2w_used.dtype)], dim=0)
+				view_matrix = torch.inverse(c2w_h)
+				proj_matrix = self._build_projection_matrix().to(self.device)
 
-			if hasattr(self.scene, 'set_image_size'):
-				self.scene.set_image_size(Wt_exp, Ht_exp)
-				
-			bg_color_val = 1.0 if self.white_bg else 0.0
-			rgb = self.scene(
-				rays_o, 
-				rays_d, 
-				bg_color=bg_color_val,
-				view_matrix=view_matrix,
-				proj_matrix=proj_matrix
-			).view(Ht_exp, Wt_exp, 3)
+				if hasattr(self.scene, 'set_image_size'):
+					self.scene.set_image_size(Wt_exp, Ht_exp)
+					
+				bg_color_val = 1.0 if self.white_bg else 0.0
+			with _nvtx_range("viewer/tile_cuda_scene_call", profile_frame):
+				rgb = self.scene(
+					rays_o, 
+					rays_d, 
+					bg_color=bg_color_val,
+					view_matrix=view_matrix,
+					proj_matrix=proj_matrix
+				).view(Ht_exp, Wt_exp, 3)
 		else:
-			rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
+			with _nvtx_range("viewer/render_scene", profile_frame):
+				rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
+
 		# if inferred dims differ from base dims, adapt base frame accordingly
 		if (Ht_exp, Wt_exp) != (self.base_H, self.base_W):
 			frame_base = torch.cat([rgb, torch.ones(Ht_exp, Wt_exp, 1, device=rgb.device)], dim=-1)
@@ -927,6 +1040,7 @@ class ViewerApp:
 			frame_base = fb_base.squeeze(0).permute(1, 2, 0)
 		else:
 			frame_base = torch.cat([rgb, torch.ones(self.base_H, self.base_W, 1, device=rgb.device)], dim=-1)
+
 		# Compute PSNR once when unlocked and exactly at a dataset pose
 		if (not self.use_dataset_pose) and (self.dataset is not None) and (self.dataset_cam_idx is not None) and (self._psnr_pending_idx == self.dataset_cam_idx) and (not self._psnr_valid) and (self._psnr_delay_frames == 0):
 			try:
@@ -953,19 +1067,24 @@ class ViewerApp:
 						pass
 			except Exception:
 				pass
+
 		# 2) Upsample to current display size with bilinear (no extra dependency)
 		if self.W != self.base_W or self.H != self.base_H:
-			fb = frame_base.permute(2, 0, 1).unsqueeze(0)  # 1x4xHb x Wb
-			fb_up = F.interpolate(fb, size=(self.H, self.W), mode='bilinear', align_corners=False)
-			frame_disp = fb_up.squeeze(0).permute(1, 2, 0)
+			with _nvtx_range("viewer/upsample", profile_frame):
+				fb = frame_base.permute(2, 0, 1).unsqueeze(0)  # 1x4xHb x Wb
+				fb_up = F.interpolate(fb, size=(self.H, self.W), mode='bilinear', align_corners=False)
+				frame_disp = fb_up.squeeze(0).permute(1, 2, 0)
 		else:
 			frame_disp = frame_base
-		frame_disp_cpu = frame_disp.detach().cpu().numpy().astype(np.float32)
+
+		with _nvtx_range("viewer/gpu_to_cpu", profile_frame):
+			frame_disp_cpu = frame_disp.detach().cpu().numpy().astype(np.float32)
 		self.last_frame_base = frame_base.detach().cpu().numpy().astype(np.float32)
 		# 3) Optional overlay in display space
 		frame_disp_cpu = self._draw_point_centers_overlay(frame_disp_cpu, c2w_used)
 		# 4) Upload to texture
-		dpg.set_value(self.tex_id, frame_disp_cpu.reshape(-1).tolist())
+		with _nvtx_range("viewer/upload_texture", profile_frame):
+			dpg.set_value(self.tex_id, frame_disp_cpu.reshape(-1).tolist())
 		self.last_frame = frame_disp_cpu
 
 		# Decrement PSNR delay counter at end of a successful render
@@ -1015,27 +1134,42 @@ class ViewerApp:
 			pass
 
 	def run(self):
-		while dpg.is_dearpygui_running():
-			now = time.time()
+		try:
+			while dpg.is_dearpygui_running():
+				now = time.time()
 
-			# FPS calculation
-			self.frame_count_for_fps += 1
-			if (now - self.last_fps_time) > 0.5:
-				fps = self.frame_count_for_fps / (now - self.last_fps_time)
-				if self.fps_text:
-					dpg.set_value(self.fps_text, f"FPS: {fps:.1f}")
-				self.last_fps_time = now
-				self.frame_count_for_fps = 0
+				# FPS calculation (UI only)
+				self.frame_count_for_fps += 1
+				if (now - self.last_fps_time) > 0.5:
+					fps = self.frame_count_for_fps / (now - self.last_fps_time)
+					if self.fps_text:
+						dpg.set_value(self.fps_text, f"FPS: {fps:.1f}")
+					self.last_fps_time = now
+					self.frame_count_for_fps = 0
 
-			# Redraw logic
-			if self.needs_redraw or (now - self.last_render_time) > (1.0 / 3.0):
-				self._render_once()
-				self.last_render_time = now
-				self.needs_redraw = False
-			
-			dpg.render_dearpygui_frame()
+				# Redraw logic
+				should_render = self.needs_redraw or (now - self.last_render_time) > (1.0 / 3.0)
+				# In profiling mode, render as fast as possible to finish the capture window quickly.
+				if self._profile_nvtx_enabled and (not self._profile_done):
+					should_render = True
 
-		dpg.destroy_context()
+				if should_render:
+					self._render_once()
+					self._rendered_frames += 1
+					self.last_render_time = now
+					self.needs_redraw = False
+
+					# Optional auto-exit for scripted profiling runs
+					if self._exit_after_profile and self._profile_done:
+						break
+				
+				dpg.render_dearpygui_frame()
+		except KeyboardInterrupt:
+			# Ensure profiling sessions flush even on Ctrl+C
+			pass
+		finally:
+			self._finalize_profiling()
+			dpg.destroy_context()
 
 
 def main():

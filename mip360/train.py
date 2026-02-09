@@ -17,10 +17,44 @@ from mip360_loader import mip360Dataset
 from save_model import save_model
 
 
+def _build_projection_from_focal(focal: float, W: int, H: int, near: float = 0.001, far: float = 100.0, device: str | torch.device = "cpu"):
+    """Match the viewer's perspective projection convention used by tile_cuda culling."""
+    focal = float(focal)
+    # vertical fov from focal length (pixels)
+    fov_y = 2.0 * float(torch.atan(torch.tensor((0.5 * H) / (focal + 1e-8))))
+    aspect = float(W) / float(H)
+    t = float(torch.tan(torch.tensor(fov_y / 2.0)))
+    r = t * aspect
+    P = torch.zeros(4, 4, dtype=torch.float32, device=device)
+    P[0, 0] = 1.0 / r
+    P[1, 1] = 1.0 / t
+    P[2, 2] = -(far + near) / (far - near)
+    P[3, 2] = 1.0
+    P[2, 3] = -(2 * far * near) / (far - near)
+    return P
 
-def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='cuda', initial_num_primitives=1024):
+
+def _c2w_to_view_matrix(c2w_3x4: torch.Tensor, device: str | torch.device):
+    """Convert (3,4) camera-to-world to (4,4) world-to-camera (view) matrix."""
+    c2w_h = torch.eye(4, dtype=torch.float32, device=device)
+    c2w_h[:3, :4] = c2w_3x4.to(device=device, dtype=torch.float32)
+    view = torch.inverse(c2w_h)
+    return view
+
+
+
+def train_scene_llff(
+    data_dir,
+    num_epochs=10,
+    batch_size=4096,
+    lr=1e-3,
+    device='cuda',
+    initial_num_primitives=1024,
+    engine: str = "vmodel",
+    tile_order: str = "per_pixel",
+):
     # Set saving directory
-    output_root = "/home/yuzhou/Desktop/output/mip360"
+    output_root = "/home/sjkim/Documents/mlpsp/output/mip360"
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
     output_dir = os.path.join(output_root, random_tag)
@@ -31,8 +65,25 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     """
     test on how to oganize parameters is suitable
     """
-    scene = NeuralPrimitiveScene(num_primitives=initial_num_primitives, hidden_dim=32, pe_frequencies=6, 
-                                 initial_positions=dataset.positions).to(device)
+    if engine == "tile_cuda":
+        # NOTE: tile_cuda training requires a CUDA backward path; we only wire the option here.
+        # This renderer consumes full-frame rays (B == W*H) and view/proj matrices.
+        from cumodel import NeuralPrimitiveSceneTileCUDA
+        scene = NeuralPrimitiveSceneTileCUDA(
+            num_primitives=initial_num_primitives,
+            hidden_dim=32,
+            pe_frequencies=6,
+            initial_positions=dataset.positions,
+        ).to(device)
+        # ensure tile order mode for this run
+        os.environ["MLPSP_TILE_ORDER"] = str(tile_order)
+    else:
+        scene = NeuralPrimitiveScene(
+            num_primitives=initial_num_primitives,
+            hidden_dim=32,
+            pe_frequencies=6,
+            initial_positions=dataset.positions,
+        ).to(device)
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
@@ -91,9 +142,10 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
     rays_o_all, rays_d_all, rgbs_all = dataset.get_all_rays(device=None)
 
     N = rays_o_all.shape[0]
-    assert batch_size <= N, "Batch size must be less than or equal to the number of rays."
-    perm = torch.randperm(N)
-    ptr = 0
+    if engine != "tile_cuda":
+        assert batch_size <= N, "Batch size must be less than or equal to the number of rays."
+        perm = torch.randperm(N)
+        ptr = 0
 
 
     # train loop
@@ -107,17 +159,31 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         #optimizer.param_groups[0]['lr'] = mlp_lr  # param_groups[0] 是 scene.mlps
         #optimizer.param_groups[2]['lr'] = position_lr  # param_groups[2] 是 scene.positions
 
-        if ptr + batch_size > N:
-            perm = torch.randperm(N)
-            ptr = 0
+        if engine == "tile_cuda":
+            # Full-frame training path (one randomly selected training image per step).
+            # dataset[idx] returns rays_o(H,W,3), rays_d(H,W,3), img(H,W,3), pose(3,4)
+            img_idx = int(torch.randint(0, len(dataset), ()).item())
+            rays_o_hw, rays_d_hw, img_hw3, pose = dataset[img_idx]
+            Himg, Wimg = img_hw3.shape[0], img_hw3.shape[1]
+            scene.set_image_size(Wimg, Himg)
 
-        idx = perm[ptr:ptr + batch_size]
-        ptr += batch_size
+            rays_o_batch = rays_o_hw.reshape(-1, 3).to(device, non_blocking=True)
+            rays_d_batch = rays_d_hw.reshape(-1, 3).to(device, non_blocking=True)
+            rgbs_batch = img_hw3.reshape(-1, 3).to(device, non_blocking=True)
 
-        
-        rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
-        rays_d_batch = rays_d_all[idx].to(device, non_blocking=True)
-        rgbs_batch   = rgbs_all[idx].to(device, non_blocking=True)
+            view_matrix = _c2w_to_view_matrix(pose, device=device)
+            proj_matrix = _build_projection_from_focal(dataset.focal, Wimg, Himg, device=device)
+        else:
+            if ptr + batch_size > N:
+                perm = torch.randperm(N)
+                ptr = 0
+
+            idx = perm[ptr:ptr + batch_size]
+            ptr += batch_size
+
+            rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
+            rays_d_batch = rays_d_all[idx].to(device, non_blocking=True)
+            rgbs_batch   = rgbs_all[idx].to(device, non_blocking=True)
 
 
         """
@@ -138,9 +204,27 @@ def train_scene_llff(data_dir, num_epochs=10, batch_size=4096, lr=1e-3, device='
         """
 
         optimizer.zero_grad()                       # 1. Clear gradients
-        pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
+        if engine == "tile_cuda":
+            pred = scene(
+                rays_o_batch, rays_d_batch,
+                score_threshold=1e-3,
+                bg_color=bg_color,
+                view_matrix=view_matrix,
+                proj_matrix=proj_matrix,
+            )
+        else:
+            pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
         loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
         loss.backward()                             # 4. Backpropagation
+
+        if engine == "tile_cuda":
+            # The tile_cuda renderer's backward is not implemented yet in this repo.
+            # Fail fast to avoid silently running a no-op training loop.
+            if getattr(scene, "W1", None) is not None and scene.W1.grad is None:
+                raise RuntimeError(
+                    "tile_cuda training selected, but CUDA backward is not implemented (no gradients on scene.W1). "
+                    "Use --engine vmodel for now, or implement the planned CUDA splatting backward (option C) first."
+                )
 
         # import pdb; pdb.set_trace()
 
