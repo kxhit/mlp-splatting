@@ -19,13 +19,31 @@ def infer_model_dims(state_dict: dict) -> tuple[int, int, int]:
     # returns (num_primitives, hidden_dim, num_frequencies)
     if "positions" in state_dict:
         num_primitives = state_dict["positions"].shape[0]
-    else:
+    elif "mlps.lin1.weight" in state_dict:
         num_primitives = state_dict["mlps.lin1.weight"].shape[0]
+    elif "W1" in state_dict:
+        num_primitives = state_dict["W1"].shape[0]
+    else:
+        raise KeyError("Cannot infer num_primitives from checkpoint state_dict")
 
-    # lin2: (N, 4, H)
-    h = state_dict["mlps.lin2.weight"].shape[2]
-    # lin1: (N, H, Denc)
-    denc = state_dict["mlps.lin1.weight"].shape[2]
+    if "mlps.lin1.weight" in state_dict and "mlps.lin2.weight" in state_dict:
+        # vmodel/cuda layout:
+        # - mlps.lin1.weight: (N, H, Denc)
+        # - mlps.lin2.weight: (N, H, H)
+        h = state_dict["mlps.lin2.weight"].shape[2]
+        denc = state_dict["mlps.lin1.weight"].shape[2]
+    elif "W1" in state_dict and "W2" in state_dict:
+        # tile_cuda/splat_tile_cuda layout:
+        # - W1: (N, H, Denc)
+        # - W2: (N, H, H)
+        h = state_dict["W2"].shape[1]
+        denc = state_dict["W1"].shape[2]
+    else:
+        raise KeyError(
+            "Cannot infer hidden_dim/encoding dim from checkpoint; "
+            "expected either mlps.lin*.weight or W* tensors"
+        )
+
     # encoded_dim = 6 * num_frequencies * 2
     assert denc % (6 * 2) == 0, "Encoded dim not divisible by 12"
     num_f = denc // 12

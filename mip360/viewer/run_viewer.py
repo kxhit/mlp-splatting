@@ -1109,7 +1109,7 @@ class ViewerApp:
 	def _reload_scene(self, ckpt_path: str):
 		# Replace current scene with a new one from ckpt_path
 		try:
-			new_scene = build_scene_from_ckpt(ckpt_path, self.device)
+			new_scene = build_scene_from_ckpt(ckpt_path, self.device, engine=self.args.engine)
 		except Exception as e:
 			print(f"[viewer] Failed to load checkpoint {ckpt_path}: {e}")
 			return

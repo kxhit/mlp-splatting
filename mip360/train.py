@@ -3,6 +3,7 @@ import uuid
 from tqdm import tqdm
 from datetime import datetime
 import copy
+import time
 import wandb
 USE_WANDB = True
 
@@ -53,6 +54,15 @@ def train_scene_llff(
     engine: str = "vmodel",
     tile_order: str = "per_pixel",
 ):
+    def _nvtx_range(msg: str):
+        class _NVTX:
+            def __enter__(self_inner):
+                if torch.cuda.is_available():
+                    torch.cuda.nvtx.range_push(msg)
+            def __exit__(self_inner, exc_type, exc, tb):
+                if torch.cuda.is_available():
+                    torch.cuda.nvtx.range_pop()
+        return _NVTX()
     # Set saving directory
     output_root = "/home/sjkim/Documents/mlpsp/output/mip360"
     os.makedirs(output_root, exist_ok=True)
@@ -96,10 +106,15 @@ def train_scene_llff(
         print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
     """
 
+    if engine == "tile_cuda":
+        mlp_params = [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]
+    else:
+        mlp_params = list(scene.mlps.parameters())
+
     optimizer = torch.optim.Adam([
-        {"params": scene.mlps.parameters()},  # 默认 1e-3
+        {"params": mlp_params},  # 默认 1e-3
         {"params": scene.log_scales, "lr": 1e-2},
-        {"params": scene.positions, "lr": 1e-4},  
+        {"params": scene.positions, "lr": 1e-4},
         #{"params": scene.rotations, "lr": 1e-2},
     ], lr=1e-3)
 
@@ -149,7 +164,16 @@ def train_scene_llff(
 
 
     # train loop
+    printed_batch = False
+    profile_enabled = os.environ.get("MLPSP_PROFILE", "0") == "1"
+    profile_start = int(os.environ.get("MLPSP_PROFILE_START", "10"))
+    profile_steps = int(os.environ.get("MLPSP_PROFILE_STEPS", "1"))
+    profiler_active = False
+    timing_enabled = os.environ.get("MLPSP_TIMING", "0") == "1"
+    timing_every = int(os.environ.get("MLPSP_TIMING_EVERY", "50"))
     for epoch in tqdm(range(num_epochs)):
+        wall_start = time.perf_counter() if timing_enabled and (epoch % timing_every == 0) else None
+        data_start = wall_start
 
         bg_color = torch.rand(3, device=device)
 
@@ -173,6 +197,9 @@ def train_scene_llff(
 
             view_matrix = _c2w_to_view_matrix(pose, device=device)
             proj_matrix = _build_projection_from_focal(dataset.focal, Wimg, Himg, device=device)
+            if not printed_batch:
+                print(f"[Batch] engine=tile_cuda batch_size={Wimg * Himg} (full frame {Wimg}x{Himg})")
+                printed_batch = True
         else:
             if ptr + batch_size > N:
                 perm = torch.randperm(N)
@@ -184,6 +211,19 @@ def train_scene_llff(
             rays_o_batch = rays_o_all[idx].to(device, non_blocking=True)
             rays_d_batch = rays_d_all[idx].to(device, non_blocking=True)
             rgbs_batch   = rgbs_all[idx].to(device, non_blocking=True)
+            if not printed_batch:
+                print(f"[Batch] engine={engine} batch_size={int(batch_size)} (random rays)")
+                printed_batch = True
+
+        data_end = time.perf_counter() if wall_start is not None else None
+        if wall_start is not None and torch.cuda.is_available():
+            fwd_start = torch.cuda.Event(enable_timing=True)
+            fwd_end = torch.cuda.Event(enable_timing=True)
+            bwd_start = torch.cuda.Event(enable_timing=True)
+            bwd_end = torch.cuda.Event(enable_timing=True)
+            opt_start = torch.cuda.Event(enable_timing=True)
+            opt_end = torch.cuda.Event(enable_timing=True)
+            fwd_start.record()
 
 
         """
@@ -203,35 +243,64 @@ def train_scene_llff(
                     )  
         """
 
-        optimizer.zero_grad()                       # 1. Clear gradients
-        if engine == "tile_cuda":
-            pred = scene(
-                rays_o_batch, rays_d_batch,
-                score_threshold=1e-3,
-                bg_color=bg_color,
-                view_matrix=view_matrix,
-                proj_matrix=proj_matrix,
-            )
-        else:
-            pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
-        loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
-        loss.backward()                             # 4. Backpropagation
+        if profile_enabled and (epoch == profile_start):
+            torch.cuda.profiler.start()
+            profiler_active = True
 
-        if engine == "tile_cuda":
-            # The tile_cuda renderer's backward is not implemented yet in this repo.
-            # Fail fast to avoid silently running a no-op training loop.
-            if getattr(scene, "W1", None) is not None and scene.W1.grad is None:
-                raise RuntimeError(
-                    "tile_cuda training selected, but CUDA backward is not implemented (no gradients on scene.W1). "
-                    "Use --engine vmodel for now, or implement the planned CUDA splatting backward (option C) first."
-                )
+        with _nvtx_range(f"train/step_{epoch}"):
+            optimizer.zero_grad()                       # 1. Clear gradients
+            if engine == "tile_cuda":
+                with _nvtx_range("train/forward_tile_cuda"):
+                    pred = scene(
+                        rays_o_batch, rays_d_batch,
+                        score_threshold=1e-3,
+                        bg_color=bg_color,
+                        view_matrix=view_matrix,
+                        proj_matrix=proj_matrix,
+                    )
+            else:
+                with _nvtx_range("train/forward_vmodel"):
+                    pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
+            loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
+            if wall_start is not None and torch.cuda.is_available():
+                fwd_end.record()
+            with _nvtx_range("train/backward"):
+                if wall_start is not None and torch.cuda.is_available():
+                    bwd_start.record()
+                loss.backward()                             # 4. Backpropagation
+                if wall_start is not None and torch.cuda.is_available():
+                    bwd_end.record()
 
         # import pdb; pdb.set_trace()
 
         #print("Position grad norm:", scene.positions.grad.norm().item())
         #with torch.no_grad():
             #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
+        if wall_start is not None and torch.cuda.is_available():
+            opt_start.record()
         optimizer.step()                            # 5. Update parameters
+        if wall_start is not None and torch.cuda.is_available():
+            opt_end.record()
+
+        if profile_enabled and profiler_active and (epoch == profile_start + profile_steps):
+            torch.cuda.profiler.stop()
+            profiler_active = False
+
+        if wall_start is not None:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                fwd_ms = fwd_start.elapsed_time(fwd_end)
+                bwd_ms = bwd_start.elapsed_time(bwd_end)
+                opt_ms = opt_start.elapsed_time(opt_end)
+            else:
+                fwd_ms = bwd_ms = opt_ms = 0.0
+            data_ms = (data_end - data_start) * 1000.0 if data_end is not None else 0.0
+            wall_ms = (time.perf_counter() - wall_start) * 1000.0
+            print(
+                f"[Timing] step={epoch} data_ms={data_ms:.2f} fwd_ms={fwd_ms:.2f} "
+                f"bwd_ms={bwd_ms:.2f} opt_ms={opt_ms:.2f} wall_ms={wall_ms:.2f}",
+                flush=True,
+            )
 
         # Accumulate loss
         loss_accum += loss.item()

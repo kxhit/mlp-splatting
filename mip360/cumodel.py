@@ -29,6 +29,7 @@ except Exception as e:  # noqa: BLE001
 # Optional: tile-based renderer extension (loaded on demand)
 _tile_ext = None
 _tile_error = None
+_tile_ext_key = None
 try:
     from torch.utils.cpp_extension import load as load_ext
     this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +43,25 @@ try:
 except Exception as e:  # noqa: BLE001
     _tile_ext = None
     _tile_error = str(e)
+
+
+def _tile_ext_build_config():
+    """Build key/name/flags for tile CUDA extension, with optional maxrregcount tuning."""
+    maxrreg_raw = os.environ.get("MLPSP_NVCC_MAXRREGCOUNT", "").strip()
+    extra_cuda_cflags = []
+    suffix = "default"
+    if maxrreg_raw:
+        try:
+            maxrreg = int(maxrreg_raw)
+            if maxrreg > 0:
+                extra_cuda_cflags.append(f"-maxrregcount={maxrreg}")
+                suffix = f"rreg{maxrreg}"
+        except ValueError:
+            # Ignore invalid values and fall back to default compile options.
+            pass
+    name = f"np_tile_kernels_{suffix}"
+    key = (name, tuple(extra_cuda_cflags))
+    return key, name, extra_cuda_cflags
 
 # Optional: cooperative splat tile-based renderer extension (loaded on demand)
 _splattile_ext = None
@@ -346,6 +366,233 @@ class NeuralPrimitiveScene(nn.Module):
         return depth
 
 
+def _encode_x6(x6: torch.Tensor, freq: torch.Tensor, att: torch.Tensor) -> torch.Tensor:
+    # x6: [M, 6], freq/att: [F]
+    xproj = x6[:, :, None] * freq[None, None, :] * att[None, None, :]
+    sincos = torch.cat([torch.sin(xproj), torch.cos(xproj)], dim=-1)
+    return sincos.reshape(x6.shape[0], -1)
+
+
+def _mlp_forward_indexed(
+    x_enc: torch.Tensor,
+    prim_ids: torch.Tensor,
+    W1: torch.Tensor, b1: torch.Tensor,
+    W2: torch.Tensor, b2: torch.Tensor,
+    W3: torch.Tensor, b3: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Match CUDA Hcap behavior
+    Hcap = min(int(W1.shape[1]), 64)
+    W1s = W1.index_select(0, prim_ids)[:, :Hcap, :]
+    b1s = b1.index_select(0, prim_ids)[:, :Hcap]
+    W2s = W2.index_select(0, prim_ids)[:, :Hcap, :Hcap]
+    b2s = b2.index_select(0, prim_ids)[:, :Hcap]
+    W3s = W3.index_select(0, prim_ids)[:, :, :Hcap]
+    b3s = b3.index_select(0, prim_ids)
+
+    h1 = torch.einsum("mhi,mi->mh", W1s, x_enc) + b1s
+    h1 = F.relu(h1)
+    h2 = torch.einsum("mho,mh->mo", W2s, h1) + b2s
+    h2 = F.relu(h2)
+    o = torch.einsum("moh,mh->mo", W3s, h2) + b3s
+    rgb = torch.sigmoid(o[:, :3])
+    sigma_raw = F.softplus(o[:, 3:4])
+    return rgb, sigma_raw
+
+
+class _TileRenderAutogradFn(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        rays_o, rays_d,
+        positions, log_scales,
+        culled_prim_indices, tile_offsets,
+        freq, att,
+        W1, b1, W2, b2, W3, b3,
+        Wimg: int, Himg: int, TW: int, TH: int,
+        threshold: float,
+        mode: int,
+        bg_color: torch.Tensor | None,
+    ):
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        if mode == 0:
+            rgb, alpha = ext.render_tiles_forward(
+                rays_o, rays_d, positions, log_scales,
+                culled_prim_indices, tile_offsets,
+                freq, att, W1, b1, W2, b2, W3, b3,
+                int(Wimg), int(Himg), int(TW), int(TH), float(threshold)
+            )
+        elif mode == 1:
+            rgb, alpha = ext.render_tiles_forward_tilecenter(
+                rays_o, rays_d, positions, log_scales,
+                culled_prim_indices, tile_offsets,
+                freq, att, W1, b1, W2, b2, W3, b3,
+                int(Wimg), int(Himg), int(TW), int(TH), float(threshold)
+            )
+        else:
+            raise ValueError("Unsupported tile mode for backward")
+
+        if bg_color is not None:
+            bg = bg_color
+            if bg.numel() == 1:
+                bg = bg.repeat(3)
+            rgb = rgb + (1.0 - alpha).clamp(0.0, 1.0) * bg.view(1, 3)
+
+        ctx.save_for_backward(
+            rays_o, rays_d, positions, log_scales,
+            culled_prim_indices, tile_offsets,
+            freq, att, W1, b1, W2, b2, W3, b3
+        )
+        ctx.Wimg = int(Wimg)
+        ctx.Himg = int(Himg)
+        ctx.TW = int(TW)
+        ctx.TH = int(TH)
+        ctx.threshold = float(threshold)
+        ctx.mode = int(mode)
+        ctx.bg_color = bg_color
+        return rgb
+
+    @staticmethod
+    def backward(ctx, grad_out_rgb):
+        (rays_o, rays_d, positions, log_scales,
+         culled_prim_indices, tile_offsets,
+         freq, att, W1, b1, W2, b2, W3, b3) = ctx.saved_tensors
+
+        grad_out_rgb = grad_out_rgb.contiguous()
+        B = rays_o.shape[0]
+        if ctx.bg_color is None:
+            grad_T_end = torch.zeros(B, device=grad_out_rgb.device, dtype=grad_out_rgb.dtype)
+        else:
+            bg = ctx.bg_color
+            if not torch.is_tensor(bg):
+                bg = torch.tensor(bg, dtype=grad_out_rgb.dtype, device=grad_out_rgb.device)
+            else:
+                bg = bg.to(device=grad_out_rgb.device, dtype=grad_out_rgb.dtype)
+            if bg.numel() == 1:
+                bg = bg.repeat(3)
+            grad_T_end = (grad_out_rgb * bg.view(1, 3)).sum(dim=-1)
+
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        chunk_size = int(os.environ.get("MLPSP_BWD_CHUNK", "65536"))
+        traversal_only = os.environ.get("MLPSP_BWD_TRAVERSAL_ONLY", "0").strip() in {"1", "true", "yes", "on"}
+        stage = os.environ.get("MLPSP_BWD_STAGE", "full").strip().lower()
+        if traversal_only:
+            stage = "traversal"
+
+        if ctx.mode == 0:
+            counts = ext.render_tiles_backward_count_per_pixel(
+                rays_o, rays_d, positions, log_scales,
+                culled_prim_indices, tile_offsets,
+                freq, att, W1, b1, W2, b2, W3, b3,
+                ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+            )
+            offsets = torch.zeros_like(counts)
+            if counts.numel() > 1:
+                offsets[1:] = torch.cumsum(counts[:-1], dim=0)
+            total = int(offsets[-1].item() + counts[-1].item()) if counts.numel() > 0 else 0
+            if total == 0:
+                grad_positions = torch.zeros_like(positions)
+                grad_log_scales = torch.zeros_like(log_scales)
+                grad_W1 = torch.zeros_like(W1)
+                grad_b1 = torch.zeros_like(b1)
+                grad_W2 = torch.zeros_like(W2)
+                grad_b2 = torch.zeros_like(b2)
+                grad_W3 = torch.zeros_like(W3)
+                grad_b3 = torch.zeros_like(b3)
+            else:
+                (prim_id, x6, grad_rgb, grad_sigma_raw,
+                 grad_positions, grad_log_scales) = ext.render_tiles_backward_emit_per_pixel(
+                    rays_o, rays_d, positions, log_scales,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    grad_out_rgb, grad_T_end,
+                    counts,
+                    offsets, total,
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
+                grad_W1 = torch.zeros_like(W1)
+                grad_b1 = torch.zeros_like(b1)
+                grad_W2 = torch.zeros_like(W2)
+                grad_b2 = torch.zeros_like(b2)
+                grad_W3 = torch.zeros_like(W3)
+                grad_b3 = torch.zeros_like(b3)
+                with torch.enable_grad():
+                    for start in range(0, total, chunk_size):
+                        end = min(total, start + chunk_size)
+                        prim_id_chunk = prim_id[start:end].to(torch.long)
+                        x6_chunk = x6[start:end]
+                        grad_rgb_chunk = grad_rgb[start:end]
+                        grad_sigma_chunk = grad_sigma_raw[start:end]
+                        x_enc = _encode_x6(x6_chunk, freq, att).detach()
+                        rgb, sigma_raw = _mlp_forward_indexed(x_enc, prim_id_chunk, W1, b1, W2, b2, W3, b3)
+                        gW1, gb1, gW2, gb2, gW3, gb3 = torch.autograd.grad(
+                            outputs=[rgb, sigma_raw],
+                            inputs=[W1, b1, W2, b2, W3, b3],
+                            grad_outputs=[grad_rgb_chunk, grad_sigma_chunk],
+                            retain_graph=False,
+                            allow_unused=False,
+                        )
+                        grad_W1.add_(gW1)
+                        grad_b1.add_(gb1)
+                        grad_W2.add_(gW2)
+                        grad_b2.add_(gb2)
+                        grad_W3.add_(gW3)
+                        grad_b3.add_(gb3)
+        elif ctx.mode == 1:
+            if stage in {"traversal", "forward"}:
+                # Profiling-only path: run traversal + MLP forward, skip backprop.
+                ext.render_tiles_backward_tilecenter_traversal(
+                    rays_o, rays_d, positions, log_scales,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
+                grad_positions = torch.zeros_like(positions)
+                grad_log_scales = torch.zeros_like(log_scales)
+                grad_W1 = torch.zeros_like(W1)
+                grad_b1 = torch.zeros_like(b1)
+                grad_W2 = torch.zeros_like(W2)
+                grad_b2 = torch.zeros_like(b2)
+                grad_W3 = torch.zeros_like(W3)
+                grad_b3 = torch.zeros_like(b3)
+            elif stage in {"backprop_noatomic", "backprop-noatomic", "noatomic"}:
+                # Profiling-only path: run backprop math without atomic accumulation.
+                ext.render_tiles_backward_tilecenter_backprop_noatomic(
+                    rays_o, rays_d, positions, log_scales,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    grad_out_rgb, grad_T_end,
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
+                grad_positions = torch.zeros_like(positions)
+                grad_log_scales = torch.zeros_like(log_scales)
+                grad_W1 = torch.zeros_like(W1)
+                grad_b1 = torch.zeros_like(b1)
+                grad_W2 = torch.zeros_like(W2)
+                grad_b2 = torch.zeros_like(b2)
+                grad_W3 = torch.zeros_like(W3)
+                grad_b3 = torch.zeros_like(b3)
+            else:
+                (grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
+                 grad_positions, grad_log_scales) = ext.render_tiles_backward_tilecenter_full(
+                    rays_o, rays_d, positions, log_scales,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    grad_out_rgb, grad_T_end,
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
+        else:
+            raise ValueError("Unsupported tile mode for backward")
+
+        return (
+            None, None,  # rays_o, rays_d
+            grad_positions, grad_log_scales,
+            None, None,  # culled_prim_indices, tile_offsets
+            None, None,  # freq, att
+            grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
+            None, None, None, None, None,  # Wimg, Himg, TW, TH, threshold
+            None, None,  # mode, bg_color
+        )
+
 class NeuralPrimitiveSceneTileCUDA(nn.Module):
     """Tile-based single-pass MLP splatting renderer.
 
@@ -360,6 +607,11 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
     def __init__(self, num_primitives=1024, hidden_dim=16, pe_frequencies=10,
                  initial_positions=None, use_integrated_pe=True):
         super().__init__()
+        if int(hidden_dim) > 32:
+            raise ValueError(
+                "NeuralPrimitiveSceneTileCUDA currently supports hidden_dim <= 32 "
+                "(kernel scratch-cap tuning in backward/full path)."
+            )
         self.num_primitives = num_primitives
         self.hidden_dim = hidden_dim
         self.pe_frequencies = pe_frequencies
@@ -417,14 +669,59 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
                 self.log_scales.copy_(legacy_state['log_scales'])
 
     def _ensure_tile_ext(self):
-        global _tile_ext
+        global _tile_ext, _tile_ext_key
         if _tile_ext is None:
             if _tile_error is not None and _tile_error.startswith('Tile CUDA source missing'):
                 raise RuntimeError(_tile_error)
             if '_tile_src_path' not in globals() or _tile_src_path is None:
                 raise RuntimeError(f"Tile CUDA not available: {_tile_error}")
-            # JIT compile on first use
-            _tile_ext = load_ext(name='np_tile_kernels', sources=[_tile_src_path], verbose=False)
+            # JIT compile on first use; allow env-controlled maxrregcount tuning.
+            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            _tile_ext = load_ext(
+                name=name,
+                sources=[_tile_src_path],
+                verbose=False,
+                extra_cuda_cflags=extra_cuda_cflags,
+            )
+            _tile_ext_key = key
+        else:
+            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            if _tile_ext_key != key:
+                _tile_ext = load_ext(
+                    name=name,
+                    sources=[_tile_src_path],
+                    verbose=False,
+                    extra_cuda_cflags=extra_cuda_cflags,
+                )
+                _tile_ext_key = key
+        return _tile_ext
+
+    @staticmethod
+    def _ensure_tile_ext_static():
+        global _tile_ext, _tile_ext_key
+        if _tile_ext is None:
+            if _tile_error is not None and _tile_error.startswith('Tile CUDA source missing'):
+                raise RuntimeError(_tile_error)
+            if '_tile_src_path' not in globals() or _tile_src_path is None:
+                raise RuntimeError(f"Tile CUDA not available: {_tile_error}")
+            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            _tile_ext = load_ext(
+                name=name,
+                sources=[_tile_src_path],
+                verbose=False,
+                extra_cuda_cflags=extra_cuda_cflags,
+            )
+            _tile_ext_key = key
+        else:
+            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            if _tile_ext_key != key:
+                _tile_ext = load_ext(
+                    name=name,
+                    sources=[_tile_src_path],
+                    verbose=False,
+                    extra_cuda_cflags=extra_cuda_cflags,
+                )
+                _tile_ext_key = key
         return _tile_ext
 
     def forward(self, ray_o, ray_d, score_threshold=1e-4, bg_color=None, view_matrix=None, proj_matrix=None):
@@ -440,61 +737,62 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
         tile_size = 16
 
         # --- 1. Tile Culling (3DGS-style) ---
-        view_proj_matrix = proj_matrix @ view_matrix
-        N = self.num_primitives
-        pos_world_h = torch.cat([self.positions, torch.ones(N, 1, device=device)], dim=-1)
+        with torch.no_grad():
+            view_proj_matrix = proj_matrix @ view_matrix
+            N = self.num_primitives
+            pos_world_h = torch.cat([self.positions, torch.ones(N, 1, device=device)], dim=-1)
 
-        # Get positions in view space
-        pos_view_h = pos_world_h @ view_matrix.T
-        depth = pos_view_h[:, 2]
-        near_plane = 0.001
-        in_front = depth > near_plane
+            # Get positions in view space
+            pos_view_h = pos_world_h @ view_matrix.T
+            depth = pos_view_h[:, 2]
+            near_plane = 0.001
+            in_front = depth > near_plane
 
-        # Get projected radius in pixels
-        scales = torch.exp(self.log_scales.squeeze(-1))
-        focal_x = proj_matrix[0, 0] * W / 2.0
-        focal_y = proj_matrix[1, 1] * H / 2.0
-        focal = (focal_x + focal_y) * 0.5
+            # Get projected radius in pixels
+            scales = torch.exp(self.log_scales.squeeze(-1))
+            focal_x = proj_matrix[0, 0] * W / 2.0
+            focal_y = proj_matrix[1, 1] * H / 2.0
+            focal = (focal_x + focal_y) * 0.5
 
-        # Derive radius from score threshold, similar to the Triton kernel logic
-        # sc = exp(-0.5 * perp2 / s^2) > score_threshold
-        # -> perp2 < -2 * s^2 * log(score_threshold)
-        # -> perp < s * sqrt(-2 * log(score_threshold))
-        radius_multiplier = torch.sqrt(-2.0 * torch.log(torch.tensor(score_threshold, device=device)))
-        world_radius = scales * radius_multiplier
-        pixel_radius = world_radius / (depth + 1e-8) * focal
+            # Derive radius from score threshold, similar to the Triton kernel logic
+            # sc = exp(-0.5 * perp2 / s^2) > score_threshold
+            # -> perp2 < -2 * s^2 * log(score_threshold)
+            # -> perp < s * sqrt(-2 * log(score_threshold))
+            radius_multiplier = torch.sqrt(-2.0 * torch.log(torch.tensor(score_threshold, device=device)))
+            world_radius = scales * radius_multiplier
+            pixel_radius = world_radius / (depth + 1e-8) * focal
 
-        # Project centers to screen
-        pos_clip = pos_view_h @ proj_matrix.T
-        w = pos_clip[..., 3:4]
-        w = w + 1e-6 * (w == 0)
-        pos_ndc = pos_clip[..., :3] / w
-        pos_screen_x = (pos_ndc[:, 0] + 1) * 0.5 * W
-        pos_screen_y = (pos_ndc[:, 1] + 1) * 0.5 * H
+            # Project centers to screen
+            pos_clip = pos_view_h @ proj_matrix.T
+            w = pos_clip[..., 3:4]
+            w = w + 1e-6 * (w == 0)
+            pos_ndc = pos_clip[..., :3] / w
+            pos_screen_x = (pos_ndc[:, 0] + 1) * 0.5 * W
+            pos_screen_y = (pos_ndc[:, 1] + 1) * 0.5 * H
 
-        # Vectorized tile-primitive overlap check
-        num_tiles_x = (W + tile_size - 1) // tile_size
-        num_tiles_y = (H + tile_size - 1) // tile_size
-        num_tiles = num_tiles_x * num_tiles_y
-        
-        tile_indices = torch.arange(num_tiles, device=device)
-        tile_x_coords = tile_indices % num_tiles_x
-        tile_y_coords = tile_indices // num_tiles_x
+            # Vectorized tile-primitive overlap check
+            num_tiles_x = (W + tile_size - 1) // tile_size
+            num_tiles_y = (H + tile_size - 1) // tile_size
+            num_tiles = num_tiles_x * num_tiles_y
+            
+            tile_indices = torch.arange(num_tiles, device=device)
+            tile_x_coords = tile_indices % num_tiles_x
+            tile_y_coords = tile_indices // num_tiles_x
 
-        tile_min_px_x = (tile_x_coords * tile_size).unsqueeze(1)
-        tile_max_px_x = ((tile_x_coords + 1) * tile_size).unsqueeze(1)
-        tile_min_px_y = (tile_y_coords * tile_size).unsqueeze(1)
-        tile_max_px_y = ((tile_y_coords + 1) * tile_size).unsqueeze(1)
+            tile_min_px_x = (tile_x_coords * tile_size).unsqueeze(1)
+            tile_max_px_x = ((tile_x_coords + 1) * tile_size).unsqueeze(1)
+            tile_min_px_y = (tile_y_coords * tile_size).unsqueeze(1)
+            tile_max_px_y = ((tile_y_coords + 1) * tile_size).unsqueeze(1)
 
-        prim_min_px_x = (pos_screen_x - pixel_radius).unsqueeze(0)
-        prim_max_px_x = (pos_screen_x + pixel_radius).unsqueeze(0)
-        prim_min_px_y = (pos_screen_y - pixel_radius).unsqueeze(0)
-        prim_max_px_y = (pos_screen_y + pixel_radius).unsqueeze(0)
+            prim_min_px_x = (pos_screen_x - pixel_radius).unsqueeze(0)
+            prim_max_px_x = (pos_screen_x + pixel_radius).unsqueeze(0)
+            prim_min_px_y = (pos_screen_y - pixel_radius).unsqueeze(0)
+            prim_max_px_y = (pos_screen_y + pixel_radius).unsqueeze(0)
 
-        overlap_x = (prim_min_px_x < tile_max_px_x) & (prim_max_px_x > tile_min_px_x)
-        overlap_y = (prim_min_px_y < tile_max_px_y) & (prim_max_px_y > tile_min_px_y)
-        
-        overlap_matrix = overlap_x & overlap_y & in_front.unsqueeze(0)
+            overlap_x = (prim_min_px_x < tile_max_px_x) & (prim_max_px_x > tile_min_px_x)
+            overlap_y = (prim_min_px_y < tile_max_px_y) & (prim_max_px_y > tile_min_px_y)
+            
+            overlap_matrix = overlap_x & overlap_y & in_front.unsqueeze(0)
 
         # Convert overlap matrix to sorted sparse format for kernel
         # Tile traversal mode:
@@ -552,14 +850,36 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
 
         ray_d_n = F.normalize(ray_d, dim=-1)
 
-        if use_globaldepth:
-            render_fn = ext.render_tiles_autograd_tilecenter_presorted
-        elif use_tilecenter:
-            render_fn = ext.render_tiles_autograd_tilecenter
+        if bg_color is not None:
+            if not torch.is_tensor(bg_color):
+                bg = torch.tensor(bg_color, dtype=ray_o.dtype, device=ray_o.device)
+            else:
+                bg = bg_color.to(ray_o.device, dtype=ray_o.dtype)
         else:
-            render_fn = ext.render_tiles_autograd
+            bg = None
 
-        rgb, alpha = render_fn(
+        if use_globaldepth:
+            if torch.is_grad_enabled():
+                raise RuntimeError("globaldepth backward is not implemented; use per_pixel or tilecenter.")
+            rgb, alpha = ext.render_tiles_autograd_tilecenter_presorted(
+                ray_o.contiguous(), ray_d_n.contiguous(),
+                self.positions.contiguous(), self.log_scales.squeeze(-1).contiguous(),
+                culled_prim_indices, tile_offsets.to(torch.int32),
+                freq.contiguous(), att.contiguous(),
+                self.W1.contiguous(), self.b1.contiguous(),
+                self.W2.contiguous(), self.b2.contiguous(),
+                self.W3.contiguous(), self.b3.contiguous(),
+                int(W), int(H), tile_size, tile_size,
+                float(score_threshold)
+            )
+            if bg is not None:
+                if bg.numel() == 1:
+                    bg = bg.repeat(3)
+                rgb = rgb + (1.0 - alpha).clamp(0.0, 1.0) * bg.view(1, 3)
+            return rgb
+
+        mode = 1 if use_tilecenter else 0
+        rgb = _TileRenderAutogradFn.apply(
             ray_o.contiguous(), ray_d_n.contiguous(),
             self.positions.contiguous(), self.log_scales.squeeze(-1).contiguous(),
             culled_prim_indices, tile_offsets.to(torch.int32),
@@ -568,18 +888,10 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             self.W2.contiguous(), self.b2.contiguous(),
             self.W3.contiguous(), self.b3.contiguous(),
             int(W), int(H), tile_size, tile_size,
-            float(score_threshold)
+            float(score_threshold),
+            int(mode),
+            bg
         )
-
-        if bg_color is not None:
-            if not torch.is_tensor(bg_color):
-                bg = torch.tensor(bg_color, dtype=rgb.dtype, device=rgb.device)
-            else:
-                bg = bg_color.to(rgb.device, dtype=rgb.dtype)
-            if bg.numel() == 1:
-                bg = bg.repeat(3)
-            rgb = rgb + (1.0 - alpha).clamp(0.0, 1.0) * bg.view(1, 3)
-
         return rgb
 
 class NeuralPrimitiveSceneSplatTileCUDA(nn.Module):
