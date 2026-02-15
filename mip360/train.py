@@ -1,3 +1,4 @@
+from multiprocessing.util import info
 import os
 import uuid
 from tqdm import tqdm
@@ -16,6 +17,8 @@ from vmodel import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
 from mip360_loader import mip360Dataset
 from save_model import save_model
+from pruning_densification import *
+
 
 
 def _build_projection_from_focal(focal: float, W: int, H: int, near: float = 0.001, far: float = 100.0, device: str | torch.device = "cpu"):
@@ -46,6 +49,7 @@ def _c2w_to_view_matrix(c2w_3x4: torch.Tensor, device: str | torch.device):
 
 def train_scene_llff(
     data_dir,
+    output_root,
     num_epochs=10,
     batch_size=4096,
     lr=1e-3,
@@ -64,9 +68,9 @@ def train_scene_llff(
                     torch.cuda.nvtx.range_pop()
         return _NVTX()
     # Set saving directory
-    output_root = "/home/sjkim/Documents/mlpsp/output/mip360"
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    random_tag = "densify_test"  # for debugging
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -97,14 +101,14 @@ def train_scene_llff(
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
-    """
+
     # 加载已有 checkpoint 权重
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/111//scene_epoch_100000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/2183/scene_epoch_176000.pt"
     if os.path.exists(model_ckpt_path):
         ckpt = torch.load(model_ckpt_path, map_location=device)
         scene.load_state_dict(ckpt)
         print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
-    """
+
 
     if engine == "tile_cuda":
         mlp_params = [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]
@@ -171,6 +175,11 @@ def train_scene_llff(
     profiler_active = False
     timing_enabled = os.environ.get("MLPSP_TIMING", "0") == "1"
     timing_every = int(os.environ.get("MLPSP_TIMING_EVERY", "50"))
+    did_densify = False
+    WARMUP_ITERS = 2000
+    fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
+
+
     for epoch in tqdm(range(num_epochs)):
         wall_start = time.perf_counter() if timing_enabled and (epoch % timing_every == 0) else None
         data_start = wall_start
@@ -278,7 +287,11 @@ def train_scene_llff(
             #print(f"[Epoch {epoch+1}] Position mean: {scene.positions.mean().item():.6f}, std: {scene.positions.std().item():.6f}")
         if wall_start is not None and torch.cuda.is_available():
             opt_start.record()
-        optimizer.step()                            # 5. Update parameters
+
+
+        zero_grads_for_ids(scene, fixed_ids)
+        optimizer.step()
+
         if wall_start is not None and torch.cuda.is_available():
             opt_end.record()
 
@@ -319,15 +332,99 @@ def train_scene_llff(
                 loss_accum = 0.0
                 loss_count = 0
 
-        # Prune & densify primitives
-        if epoch % 500 == 0 and epoch > 500:
-            #prune_primitives(scene)
-            #MAX_NUM_PRIMITIVES = initial_num_primitives
-            #if scene.num_primitives < MAX_NUM_PRIMITIVES:
-            #    densify_primitives(scene, num_new=min(16, MAX_NUM_PRIMITIVES - scene.num_primitives))
-            print(f"After pruning and densifying, scene has {scene.num_primitives} primitives.")
+        if (engine == "tile_cuda") and (epoch == 1) and (epoch > 0) and (not did_densify):
+            """
+            tile_results = sample_worst_tiles_l1(
+                scene, dataset,
+                k_images=100,
+                m_tiles=20,
+                tile_size=32,
+                score_threshold=1e-3,
+                bg_color=torch.zeros(3, device="cuda"),
+                seed=0,
+            )
 
-        # Eval after 500 epoch 
+            sampled_ids = [r["img_idx"] for r in tile_results]
+            print(sampled_ids)
+
+            torch.save(tile_results, os.path.join(output_dir, "tile_results.pt"))
+
+            #print(f"[Tile Results] {tile_results}")
+            pointcloud_xyz = tiles_to_points_from_tmap(
+                scene, dataset,
+                tile_results,
+                tile_size=32,
+                score_threshold=1e-3,
+                bg_color=torch.zeros(3, device="cuda"),
+                alpha_min=1e-10,
+            )
+
+            # 你已有的 densify 接口直接吃 (M,3)
+            stats = densify_tilecuda_from_pointcloud_random(scene, pointcloud_xyz, DENSIFY_K)
+
+            
+            
+            stats = densify_tilecuda_stage1_from_worst_tiles(
+            scene, dataset,
+            k_images=100, m_tiles=20, tile_size=32,
+        )
+
+            torch.save(scene.state_dict(), os.path.join(output_dir, "after_densification.pt"))
+            did_densify = True
+            print(f"[densify] {stats}")
+
+            # 跑通优先：重建 optimizer，让新增 Parameter 被优化
+            optimizer = torch.optim.Adam([
+                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
+                {'params': [scene.log_scales], 'lr': 1e-2},
+                {'params': [scene.positions], 'lr': 1e-4},
+            ])
+            print("[densify] optimizer rebuilt.")
+            """
+
+            densify_scores = compute_multiview_densify_scores(
+                scene, dataset,
+                k_images=20,
+                mask_quantile=0.9,
+                cover_mult=3.716,
+                chunk_prims=128,
+                seed=0,
+            )
+
+            # 例如：选 score > densify_thr 的 primitives 作为 densify target（覆盖多视角高误差区域）
+            densify_thr = 1000.0
+            densify_ids = torch.nonzero(densify_scores > densify_thr, as_tuple=False).squeeze(-1)
+
+            prune_scores = compute_multiview_prune_scores(
+                scene, dataset,
+                k_images=20,
+                mask_quantile=0.90,
+                cover_mult=3.716,
+                chunk_prims=64,
+                seed=0,
+            )
+            prune_thr = 0.8
+            prune_ids = torch.nonzero(prune_scores > float(prune_thr), as_tuple=False).squeeze(-1)
+            densify_prune_tilecuda_and_rebuild_optimizeroptimizer, info, fixed_ids = densify_prune_tilecuda_and_rebuild_optimizer(
+                scene, optimizer,
+                densify_ids=densify_ids,   # 旧空间 ids
+                prune_ids=prune_ids,       # 旧空间 ids（高分删）
+                init_std=0.01,
+                jitter_frac=0.10,
+                scale_div=2.0,
+            )
+            print(info)
+
+            optimizer = torch.optim.Adam([
+                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
+                {'params': [scene.log_scales], 'lr': 1e-2},
+                {'params': [scene.positions], 'lr': 1e-4},
+            ])
+            torch.save(scene.state_dict(), os.path.join(output_dir, "after_pruning.pt"))
+
+            did_densify = True
+
+        # Eval after 500 epochs
         if (epoch + 1) % 500 == 0:
             torch.save(scene.state_dict(), os.path.join(output_dir, "scene_ckpt_tmp.pt"))
             #evaluate_and_visualize(data_dir, model_ckpt=scene.state_dict(), N=scene.num_primitives, device=device)
@@ -552,3 +649,4 @@ def get_mlp_lr(iteration, max_steps=100000, init_lr=1e-3, final_lr=1e-4):
     else:
         alpha = (iteration - halfway) / (max_steps - halfway)
         return init_lr * (1 - alpha) + final_lr * alpha
+    

@@ -18,6 +18,7 @@ def set_seed(seed=42):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_dir", type=str, default="/media/sjkim/HDD_3TB/dataset/360_v2/bonsai")
+    parser.add_argument("--output_dir", type=str, default="/home/sjkim/Documents/mlpsp/output/mip360")
     parser.add_argument("--num_epochs", type=int, default=800000)
     parser.add_argument("--batch_size", type=int, default=12000, help="Used by vmodel engine (random rays).")
     parser.add_argument("--initial_num_primitives", type=int, default=2183)
@@ -41,6 +42,7 @@ if __name__ == "__main__":
     set_seed(args.seed)
     train_scene_llff(
         args.data_dir,
+        args.output_dir,
         num_epochs=args.num_epochs,
         batch_size=args.batch_size,
         initial_num_primitives=args.initial_num_primitives,
