@@ -70,7 +70,7 @@ def train_scene_llff(
     # Set saving directory
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
-    random_tag = "densify_test"  # for debugging
+    random_tag = "delta_b"  # for debugging
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -101,14 +101,14 @@ def train_scene_llff(
     #optimizer = torch.optim.Adam(scene.parameters(), lr=lr)
 
 
-
+    """
     # 加载已有 checkpoint 权重
     model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/2183/scene_epoch_176000.pt"
     if os.path.exists(model_ckpt_path):
         ckpt = torch.load(model_ckpt_path, map_location=device)
         scene.load_state_dict(ckpt)
         print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
-
+    """
 
     if engine == "tile_cuda":
         mlp_params = [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]
@@ -271,6 +271,8 @@ def train_scene_llff(
                 with _nvtx_range("train/forward_vmodel"):
                     pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
             loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
+            #loss = F.l1_loss(pred, rgbs_batch)
+
             if wall_start is not None and torch.cuda.is_available():
                 fwd_end.record()
             with _nvtx_range("train/backward"):
@@ -332,7 +334,7 @@ def train_scene_llff(
                 loss_accum = 0.0
                 loss_count = 0
 
-        if (engine == "tile_cuda") and (epoch == 1) and (epoch > 0) and (not did_densify):
+        if (engine == "tile_cuda") and (epoch % 5000 == 0) and (epoch > 0) and (not did_densify):
             """
             tile_results = sample_worst_tiles_l1(
                 scene, dataset,
@@ -385,25 +387,25 @@ def train_scene_llff(
             densify_scores = compute_multiview_densify_scores(
                 scene, dataset,
                 k_images=20,
-                mask_quantile=0.9,
+                r_threshold=0.10,
                 cover_mult=3.716,
                 chunk_prims=128,
                 seed=0,
             )
 
             # 例如：选 score > densify_thr 的 primitives 作为 densify target（覆盖多视角高误差区域）
-            densify_thr = 1000.0
+            densify_thr = 500.0
             densify_ids = torch.nonzero(densify_scores > densify_thr, as_tuple=False).squeeze(-1)
 
             prune_scores = compute_multiview_prune_scores(
                 scene, dataset,
                 k_images=20,
-                mask_quantile=0.90,
+                r_threshold=0.10,
                 cover_mult=3.716,
-                chunk_prims=64,
+                chunk_prims=128,
                 seed=0,
             )
-            prune_thr = 0.8
+            prune_thr = 0.9
             prune_ids = torch.nonzero(prune_scores > float(prune_thr), as_tuple=False).squeeze(-1)
             densify_prune_tilecuda_and_rebuild_optimizeroptimizer, info, fixed_ids = densify_prune_tilecuda_and_rebuild_optimizer(
                 scene, optimizer,
@@ -423,6 +425,10 @@ def train_scene_llff(
             torch.save(scene.state_dict(), os.path.join(output_dir, "after_pruning.pt"))
 
             did_densify = True
+        
+        if epoch % 5000 == 500 and epoch > 500:
+            fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
+
 
         # Eval after 500 epochs
         if (epoch + 1) % 500 == 0:
