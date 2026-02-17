@@ -334,7 +334,7 @@ def train_scene_llff(
                 loss_accum = 0.0
                 loss_count = 0
 
-        if (engine == "tile_cuda") and (epoch % 5000 == 0) and (epoch > 0) and (not did_densify):
+        if (engine == "tile_cuda") and (epoch % 5000 == 0) and (epoch > 0):
             """
             tile_results = sample_worst_tiles_l1(
                 scene, dataset,
