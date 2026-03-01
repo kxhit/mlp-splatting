@@ -1,14 +1,37 @@
 import numpy as np
 import imageio
-import os
+import os, re
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 from utils.read_write_model import read_images_binary, read_cameras_binary, read_points3D_binary, qvec2rotmat
 
 
+def _basename_no_ext(p: str) -> str:
+    return os.path.splitext(os.path.basename(p))[0]
+
+
+def _last_int_suffix(name_no_ext: str):
+    """
+    返回 (has_num, num) 用于排序：
+    - has_num=1 表示能提取到最后一段数字（包括 0）
+    - has_num=0 表示没有数字后缀
+    """
+    m = re.search(r'(\d+)$', name_no_ext)
+    if m:
+        return (1, int(m.group(1)))  # int("0") == 0，没问题
+    return (0, -1)
+
+def _smart_image_sort_key(path: str):
+    n = _basename_no_ext(path)
+    has_num, num = _last_int_suffix(n)
+    # 先按“是否有数字后缀”排（有数字的在前），再按数字大小，最后按字符串兜底
+    return (-has_num, num, n)
+
+
+
 class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=4, llffhold=8, split='train'):
+    def __init__(self, basedir, factor=2, llffhold=8, split='train'):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
         self.llffhold = llffhold
@@ -16,90 +39,115 @@ class mip360Dataset(Dataset):
         self._load_meta(factor)
 
     def _load_meta(self, factor):
-        # === Modified: load poses from COLMAP ===
+        # === Load COLMAP ===
         colmap_dir = os.path.join(self.basedir, "sparse/0")
         images = read_images_binary(os.path.join(colmap_dir, "images.bin"))
         cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
-        image_ids_sorted = sorted(images.keys())
+        # 1) name -> (pose, hwf)
+        name2pose = {}
+        name2hwf  = {}
 
-        poses = []
-        hwf_list = []
-        for image_id in image_ids_sorted:
-            image = images[image_id]
+        for image_id, image in images.items():
             cam = cameras[image.camera_id]
 
-            # pose: w2c → c2w
             R = qvec2rotmat(image.qvec)
             t = image.tvec.reshape(3,)
+
             c2w = np.eye(4)
             c2w[:3, :3] = R.T
-            c2w[:3, 3] = -R.T @ t
-            poses.append(c2w[:3, :4])
+            c2w[:3, 3]  = -R.T @ t
 
-            # intrinsic: assume fx = fy
             H, W = cam.height, cam.width
-            fx = cam.params[0]
-            hwf_list.append([H, W, fx])
+            fx = cam.params[0]  # assume fx=fy as you did
 
-        poses = np.stack(poses, axis=0)         # (N, 3, 4)
-        hwf = np.array(hwf_list)                # (N, 3)
+            # 关键：用 COLMAP 的 image.name 作为主键
+            # 一般 image.name 可能包含子目录，也可能就是文件名；我们统一取 basename
+            colmap_base = os.path.basename(image.name)
+            name2pose[colmap_base] = c2w[:3, :4]
+            name2hwf[colmap_base]  = [H, W, fx]
 
-        # === Normalize poses (keep original logic) ===
+        # === Normalize poses (keep your original logic, but computed on matched poses later) ===
+
+        # 2) Load image files, sort by "last number" (handle 0 correctly)
+        if factor == 1:
+            image_dir = os.path.join(self.basedir, "images")
+        else:
+            image_dir = os.path.join(self.basedir, f"images_{factor}")
+
+        exts = ('.JPG', '.jpg', '.png', '.PNG', '.jpeg', '.JPEG')
+        image_paths_all = [
+            os.path.join(image_dir, f)
+            for f in os.listdir(image_dir)
+            if f.endswith(exts)
+        ]
+        image_paths_all.sort(key=_smart_image_sort_key)
+
+        # 3) Join by filename
+        matched_paths = []
+        matched_poses = []
+        matched_hwf   = []
+
+        missing_in_colmap = []
+        for p in image_paths_all:
+            base = os.path.basename(p)
+            if base not in name2pose:
+                missing_in_colmap.append(base)
+                continue
+            matched_paths.append(p)
+            matched_poses.append(name2pose[base])
+            matched_hwf.append(name2hwf[base])
+
+        if len(matched_paths) == 0:
+            raise RuntimeError(
+                f"No images matched between {image_dir} and COLMAP images.bin. "
+                f"Example disk file: {os.path.basename(image_paths_all[0]) if image_paths_all else 'N/A'}; "
+                f"Example colmap name: {next(iter(name2pose.keys())) if name2pose else 'N/A'}"
+            )
+
+        # 你可以按需打印缺失项（一般是图像目录和COLMAP用的不是同一批）
+        if len(missing_in_colmap) > 0:
+            print(f"[Warn] {len(missing_in_colmap)} images exist on disk but not in COLMAP. "
+                  f"First few: {missing_in_colmap[:10]}")
+
+        poses = np.stack(matched_poses, axis=0)     # (N,3,4)
+        hwf   = np.array(matched_hwf, dtype=np.float32)  # (N,3)
+
+        # 4) Normalize poses (your original)
         positions = poses[:, :, 3]
         avg_position = np.mean(positions, axis=0)
         dists = np.linalg.norm(positions - avg_position, axis=1)
-        scale = 1.0 / (np.max(dists) * 0.75)  # 0.75 is a typical scaling factor
+        scale = 1.0 / (np.max(dists) * 0.75)
 
         poses[:, :, 3] -= avg_position
         poses[:, :, 3] *= scale
 
         self.poses = torch.from_numpy(poses).float()
 
-
         # === Load and normalize COLMAP point cloud ===
         points3D = read_points3D_binary(os.path.join(colmap_dir, "points3D.bin"))
         all_xyz = []
-
         for pid in sorted(points3D.keys()):
-            xyz = points3D[pid].xyz
-            all_xyz.append(xyz)
-
-        all_xyz = np.stack(all_xyz, axis=0)  # shape: (M, 3)
-
-        # === Apply same normalization: translation + scaling ===
+            all_xyz.append(points3D[pid].xyz)
+        all_xyz = np.stack(all_xyz, axis=0)
         all_xyz -= avg_position
         all_xyz *= scale
+        self.positions = torch.from_numpy(all_xyz).float()
 
-
-        self.positions = torch.from_numpy(all_xyz).float()  # shape: (M, 3)
-
-
-        # === Keep the remaining part unchanged ===
-        # Load images
-        if factor == 1:
-            image_dir = os.path.join(self.basedir, f"images")
-        else:
-            image_dir = os.path.join(self.basedir, f"images_{factor}")
-        self.image_paths = sorted([
-            os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('JPG', 'jpg', 'png'))
-        ])
+        # 5) Load images strictly in matched order
+        self.image_paths = matched_paths
         self.images = [self.transform(imageio.imread(p)) for p in self.image_paths]
         self.images = torch.stack(self.images)
 
-        # Save normalization parameters for later use
         self.scale = scale
         self.avg_position = avg_position
 
-        # Compute focal length (derived from hwf)
-        self.focal = hwf[0, 2] / factor  # Adjusted by downsampling factor
+        self.focal = hwf[0, 2] / factor
 
-
-        # === Train/test split following llffhold convention ===
+        # 6) Split (must use matched length)
         num_images = self.images.shape[0]
         i_test = np.arange(num_images)[::self.llffhold]
-        i_train = np.array([i for i in range(num_images) if i not in i_test])
-
+        i_train = np.array([i for i in range(num_images) if i not in set(i_test)])
 
         if self.split == 'train':
             select_ids = i_train
@@ -108,23 +156,13 @@ class mip360Dataset(Dataset):
         else:
             raise ValueError(f"Unknown split type: {self.split}")
 
-        # Apply split
         self.images = self.images[select_ids]
-        self.poses = self.poses[select_ids]
+        self.poses  = self.poses[select_ids]
 
-        # Expose selected indices and their corresponding image paths for UI/inspection
-        try:
-            self.select_ids = select_ids.tolist() if hasattr(select_ids, "tolist") else list(select_ids)
-        except Exception:
-            # fallback best-effort
-            self.select_ids = [int(i) for i in select_ids]
-        try:
-            self.image_paths_selected = [self.image_paths[i] for i in self.select_ids]
-        except Exception:
-            # keep parity with dataset length if something goes wrong
-            self.image_paths_selected = []
+        self.select_ids = select_ids.tolist() if hasattr(select_ids, "tolist") else list(select_ids)
+        self.image_paths_selected = [self.image_paths[i] for i in self.select_ids]
 
-        print(f"Loaded {len(self.images)} images from {image_dir}")
+        print(f"Loaded {len(self.images)} images from {image_dir} (matched from {len(matched_paths)} total).")
 
 
     def __len__(self):

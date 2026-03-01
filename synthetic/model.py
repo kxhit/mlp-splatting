@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.spatial import cKDTree
+from utils.sampling import octree_sample
 
 
 class IntegratedPositionalEncoding(nn.Module):
@@ -70,18 +71,26 @@ class NeuralPrimitiveScene(nn.Module):
             self.positions = nn.Parameter(
                 torch.rand(num_primitives, 3) * 2 * bound - bound
             )
+            sampled_scales = torch.ones(num_primitives) * 0.1
         else:
             # 从 initial_positions 中随机采样 num_primitives 个点
             assert initial_positions.shape[1] == 3, "initial_positions should be of shape (N, 3)"
             N = initial_positions.shape[0]
             assert N >= self.num_primitives, f"initial_positions must have at least {self.num_primitives} points"
 
+            """
             indices = torch.randperm(N)[:self.num_primitives]
             sampled_positions = initial_positions[indices]
             self.positions = nn.Parameter(sampled_positions.clone().detach())  # make it a learnable parameter
+            """
+            sampled_positions, sampled_scales = octree_sample(initial_positions)
+            sampled_scales /= 10
+            self.positions = nn.Parameter(sampled_positions.clone().detach())
+
 
         #self.scales = nn.Parameter(torch.ones(num_primitives, 1) * 0.1)  # Learnable per-primitive scale
-        self.log_scales = nn.Parameter(torch.log(torch.ones(num_primitives, 1) * 0.1))
+
+        self.log_scales = nn.Parameter(torch.log(sampled_scales).unsqueeze(-1) )  # Learnable per-primitive scale
 
         self.mlps = nn.ModuleList([
             PrimitiveMLP(input_dim=6, hidden_dim=hidden_dim, num_frequencies=pe_frequencies)
@@ -119,7 +128,6 @@ class NeuralPrimitiveScene(nn.Module):
         return selected_inds
 
 
-    
     def forward(self, ray_o, ray_d, mlp_id=None):
         self.invalid_nums = 0
         B = ray_o.shape[0]
@@ -163,7 +171,6 @@ class NeuralPrimitiveScene(nn.Module):
                 # TODO log the alpha for pruning
 
                 #continue
-
 
             """
             if scales[i] > 0.005: #or scales[i] > 200:

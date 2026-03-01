@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-
+from tqdm import tqdm
 
 
 def compute_multiview_densify_scores(
@@ -241,6 +241,42 @@ def compute_multiview_prune_scores(
 
 
 
+@torch.no_grad()
+def get_prune_ids_by_opacity_bias(scene, threshold: float = 0.005):
+    """
+    根據 MLP 最后一層的 Bias (b3[3]) 來判斷哪些 Primitive 太透明，需要被剪枝。
+    
+    參數:
+      scene: 包含 b3 參數的模型
+      threshold: 透明度閾值，預設 0.005
+    返回:
+      prune_ids: torch.Tensor (long), 需要被刪除的索引
+    """
+    # b3 的形狀通常是 (N, 4)，最後一維是 [R, G, B, Opacity_logit]
+    # 我們只取最後一維
+    opacity_logits = scene.b3.data[:, 3]
+    
+    # 計算基礎透明度 (Base Opacity)
+    base_opacity = torch.sigmoid(opacity_logits)
+    
+    # 找出小於閾值的索引
+    prune_mask = base_opacity < threshold
+    prune_ids = torch.nonzero(prune_mask).squeeze(-1)
+    
+    return prune_ids
+
+
+@torch.no_grad()
+def get_prune_ids_by_scale(scene, threshold: float = 1.5):
+    scale_scales = torch.exp(scene.log_scales.squeeze(-1))
+
+    # 找出大於閾值的索引
+    prune_mask = scale_scales > threshold
+    prune_ids = torch.nonzero(prune_mask).squeeze(-1)
+    
+    return prune_ids
+
+
 
 @torch.no_grad()
 def densify_prune_tilecuda_and_rebuild_optimizer(
@@ -252,6 +288,7 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
     init_std: float = 0.01,
     jitter_frac: float = 0.1,   # δ = jitter_frac * (scale_old) * rand_unit
     scale_div: float = 2.0,      # scale /= 2
+    scale_threshold: float = 0.05, # scale > threshold => split; else clone
     reset_alpha_for_touched: bool = True,
     keep_new_from_prune: bool = True,  # prune_ids 默认是旧 index 空间；不去 prune 新的
 ):
@@ -275,6 +312,15 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
 
     densify_ids = torch.as_tensor(densify_ids, device=device, dtype=torch.long)
     prune_ids   = torch.as_tensor(prune_ids,   device=device, dtype=torch.long)
+
+    """
+    all_grads = scene.positions.grad[densify_ids] # (K, 3)
+    grad_norms = torch.norm(all_grads, dim=-1)    # (K,)
+    eps = 1e-9
+    mask = grad_norms > eps
+    densify_ids = densify_ids[mask]
+    """
+
     densify_ids = torch.unique(densify_ids)
     prune_ids   = torch.unique(prune_ids)
 
@@ -286,6 +332,7 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
         if int(prune_ids.min()) < 0 or int(prune_ids.max()) >= N0:
             raise ValueError(f"prune_ids out of range (assumed old space): [0,{N0-1}]")
 
+
     """
     # If an id is both densify and prune: pruning wins, so skip densify for it.
     if densify_ids.numel() > 0 and prune_ids.numel() > 0:
@@ -295,65 +342,120 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
     K = int(densify_ids.numel())
 
 
+
+
     # ==========
-    # 1) DENSIFY (MLP Splitting with Opacity Compensation)
+    # 1) DENSIFY (Split vs Clone based on Scale)
     # ==========
     if K > 0:
         pos = scene.positions.data
         lsc = scene.log_scales.data
         W1, b1, W2, b2, W3, b3 = scene.W1.data, scene.b1.data, scene.W2.data, scene.b2.data, scene.W3.data, scene.b3.data
 
-        # --- A. 获取梯度方向 (打破对称性的关键) ---
-        # 我们利用 positions 的梯度来决定新 MLP 的位移方向
-        if scene.positions.grad is not None:
-            # 提取要分裂点的梯度
-            grads = scene.positions.grad[densify_ids] 
-            # 这里的梯度方向代表 Loss 上升最快方向，我们向负梯度方向（Loss 下降方向）移动
-            # 只取方向，归一化处理
-            grad_dir = -grads / (torch.norm(grads, dim=-1, keepdim=True) + 1e-12)
-        else:
-            # 如果万一没有梯度信息，回退到随机方向
-            grad_dir = torch.randn((K, 3), device=device, dtype=pos.dtype)
-            grad_dir = grad_dir / (grad_dir.norm(dim=-1, keepdim=True) + 1e-12)
+        # --- A. 获取梯度方向 ---
+        state = optimizer.state.get(scene.positions, None)
+        if state is not None and "exp_avg" in state:
+            m = state["exp_avg"]  # (N,3)
+            dirs = m[densify_ids]
+            dir_unit = dirs / (dirs.norm(dim=-1, keepdim=True) + 1e-12)
 
-        # --- B. 透明度补偿 ---
-        with torch.no_grad():
-            old_bias_w = b3[densify_ids, 3]
-            alpha = torch.sigmoid(old_bias_w)
-            alpha = torch.clamp(alpha, 1e-6, 0.99) 
-            new_alpha = 1.0 - torch.sqrt(1.0 - alpha)
-            new_bias_w = torch.log(new_alpha / (1.0 - new_alpha + 1e-8))
-
-        # --- C. 空间属性：旧的不动，新的沿梯度移动 ---
+        # --- B. 判断分类：Split (大) vs Clone (小) ---
         scale_old = torch.exp(lsc[densify_ids].squeeze(-1))
-        # 偏移量 δ = jitter_frac * scale
-        delta = (float(jitter_frac) * scale_old)[:, None] * grad_dir 
+        is_large = scale_old > scale_threshold  # (K,) bool mask
 
-        old_pos_new = pos.clone()  # 旧的 B 保持在 pos[densify_ids]
-        new_pos = pos[densify_ids] + delta  # 新的 C 朝梯度优化方向跳一步
+        # --- C. 计算位移与 Scale 变化 ---
+        # 大 scale: 移动 0.2, 且 scale 缩小 (scale_div=1.5)
+        # 小 scale: 移动 0.5, 且 scale 保持
+        jitter = torch.where(is_large, 1, 1)
+        # 旧的 B Loss 下降
+        delta = (jitter * scale_old)[:, None] * (-dir_unit)
+
+        old_pos_new = pos.clone()
+        old_pos_new[densify_ids] += delta  # B
+        new_pos = pos[densify_ids] -+ delta  # C
 
         old_lsc_new = lsc.clone()
-        new_lsc = lsc[densify_ids].clone()
+        # 只有大的需要缩小体积 (scale /= 1.5 => log_scale -= log(1.5))
+        lsc_shrink = torch.where(is_large, math.log(5), 0.0)
+        lsc_shrink = lsc_shrink.unsqueeze(-1)
+        old_lsc_new[densify_ids] -= lsc_shrink
+        new_lsc = lsc[densify_ids] - lsc_shrink
 
-        # --- D. MLP 权重继承与扰动 ---
+        # --- D. 透明度补偿 (保持透過率一致) ---
+        old_bias_w = b3[densify_ids, 3]
+
+        """
+        # --- D. 综合诊断打印 (前 50 个) ---
+        grad_norms = torch.norm(dirs, dim=-1)
+        
+        print(f"\n[Densify Diagnosis] Total IDs: {K}")
+        # 这里的标题改为 Opacity(Phys)，代表物理透明度
+        print(f"{'ID_idx':>8} | {'Opacity(Phys)':>15} | {'Grad_Norm':>12} | {'Scale':>10}")
+        print("-" * 60)
+        
+        # 修改打印逻辑：打印前 50 个，如果不足 50 则打印全部
+        num_to_print = min(K, 50)
+        display_ids = list(range(num_to_print))
+        
+        # 如果总数超过 50, 最后再补 5 个结尾的，方便看整体跨度
+        if K > 55:
+            display_ids += [-1] # 占位符
+            display_ids += list(range(K-5, K))
+
+        for i in display_ids:
+            if i == -1:
+                print("   ...      |       ...       |     ...      |    ...")
+                continue
+            
+            # 1. 物理透明度 (Sigmoid 之后)
+            # 如果 old_bias_w[i] 是 0，这里会显示 0.500000
+            b_phys = torch.sigmoid(old_bias_w[i]).item()
+            
+            # 2. 梯度模长
+            g_val = grad_norms[i].item()
+            
+            # 3. 尺寸
+            s_val = scale_old[i].item()
+            
+            print(f"{i:8d} | {b_phys:15.6f} | {g_val:12.6e} | {s_val:10.5f}")
+            
+        print("-" * 60)
+        
+        # 统计小信息：有多少是“死点”
+        num_zeros = (grad_norms < 1e-12).sum().item()
+        print(f"Summary: {num_zeros}/{K} points have ZERO gradient (Norm < 1e-12)")
+        print("-" * 60 + "\n")
+        """
+        
+        """
+        alpha = torch.sigmoid(old_bias_w)
+        alpha = torch.clamp(alpha, 1e-6, 0.99) 
+        new_alpha = 1.0 - torch.sqrt(1.0 - alpha)
+        new_bias_w = torch.log(new_alpha / (1.0 - new_alpha + 1e-8))
+        """
+
+        #y = F.softplus(old_bias_w)               # sigma_raw_old (bias-only approx)
+        #new_bias_w = torch.log(torch.expm1(0.5 * y))
+        new_bias_w = old_bias_w 
+
+
+        # --- E. MLP 权重继承与扰动 ---
         old_W1_new, old_b1_new = W1.clone(), b1.clone()
         old_W2_new, old_b2_new = W2.clone(), b2.clone()
         old_W3_new, old_b3_new = W3.clone(), b3.clone()
-        old_b3_new[densify_ids, 3] = new_bias_w
+        old_b3_new[densify_ids, 3] = new_bias_w 
 
         new_W1, new_b1 = W1[densify_ids].clone(), b1[densify_ids].clone()
         new_W2, new_b2 = W2[densify_ids].clone(), b2[densify_ids].clone()
         new_W3, new_b3 = W3[densify_ids].clone(), b3[densify_ids].clone()
-        new_b3[:, 3] = new_bias_w
+        new_b3[:, 3] = new_bias_w  
 
-        # 加入极小权重噪声进一步打破 MLP 内部的对称性
-        noise_std = 1e-3
-        old_W3_new[densify_ids] += torch.randn_like(old_W3_new[densify_ids]) * noise_std
+        # 打破权重对称性
+        noise_std = 1e-2
         new_W3 += torch.randn_like(new_W3) * noise_std
         new_W2 += torch.randn_like(new_W2) * (noise_std * 0.1)
 
-        
-        # --- E. 参数写回 ---
+        # --- F. 参数写回 ---
         scene.positions  = nn.Parameter(torch.cat([old_pos_new, new_pos], dim=0))
         scene.log_scales = nn.Parameter(torch.cat([old_lsc_new, new_lsc], dim=0))
         scene.W1 = nn.Parameter(torch.cat([old_W1_new, new_W1], dim=0))
@@ -407,33 +509,49 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
     N2 = int(scene.num_primitives)  # final
 
     # ==========
-    # 3) REBUILD OPTIMIZER (preserve group LRs/hparams)
+    # 3) REBUILD OPTIMIZER (with Stage 1 Strategy)
     # ==========
     defaults = optimizer.defaults
+    
+    # 基础学习率获取 (保持原有的配置)
+    def group_lr(g_idx):
+        if len(optimizer.param_groups) > g_idx:
+            return optimizer.param_groups[g_idx].get("lr", defaults.get("lr", 1e-3))
+        return defaults.get("lr", 1e-3)
 
-    def group_lr(g):
-        return g.get("lr", defaults.get("lr", 1e-3))
+    base_lr_mlp = group_lr(0)
+    base_lr_lsc = group_lr(1)
+    base_lr_pos = group_lr(2)
 
-    lr0 = group_lr(optimizer.param_groups[0]) if len(optimizer.param_groups) > 0 else defaults.get("lr", 1e-3)
-    lr1 = group_lr(optimizer.param_groups[1]) if len(optimizer.param_groups) > 1 else lr0
-    lr2 = group_lr(optimizer.param_groups[2]) if len(optimizer.param_groups) > 2 else lr0
+    # --- 阶段 1 压制逻辑 ---
+    # 我们调低 Scale 和 Position 的学习率，迫使 Opacity (MLP Bias) 成为主要优化手段
+    stage1_scale_mult = 1  # 压制 Scale 增长，防止其通过变大来遮掩空隙
+    stage1_pos_mult   = 1  # 稳定位置，防止剧烈跳动破坏补偿逻辑
 
     mlp_params = [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]
 
     new_optimizer = torch.optim.Adam(
         [
-            {"params": mlp_params,         "lr": lr0},
-            {"params": [scene.log_scales], "lr": lr1},
-            {"params": [scene.positions],  "lr": lr2},
+            {
+                "params": mlp_params, 
+                "lr": base_lr_mlp, 
+                "name": "mlp"
+            },
+            {
+                "params": [scene.log_scales], 
+                "lr": base_lr_lsc * stage1_scale_mult, 
+                "name": "log_scales"
+            },
+            {
+                "params": [scene.positions], 
+                "lr": base_lr_pos * stage1_pos_mult, 
+                "name": "positions"
+            },
         ],
-        lr=lr0,
-        betas=defaults.get("betas", (0.9, 0.999)),
-        eps=defaults.get("eps", 1e-8),
-        weight_decay=defaults.get("weight_decay", 0.0),
-        amsgrad=defaults.get("amsgrad", False),
+        lr=base_lr_mlp,
+        betas=(0.7, 0.999), # 调低 beta1 (0.9 -> 0.7) 让优化器对分裂后的新梯度更“敏感”
+        eps=defaults.get("eps", 1e-3)
     )
-
-    torch.cuda.empty_cache()
 
     # ==========
     # 4) RETURN UNAFFECTED IDS (final index space)
@@ -466,11 +584,313 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
         "densified": int(K),
         "pruned": int(prune_ids.numel()),
         "N_final": N2,
-        "lrs": (float(lr0), float(lr1), float(lr2)),
-        #"new_ids_appended_preprune": (list(range(N0, N0 + K)) if K > 0 else []),
     }
 
-    return new_optimizer, info, unaffected_final_ids
+    # ==========
+    # 5) COMPUTE AFFECTED IDS (final index space)
+    # ==========
+    # 在最终的 N2 长度空间中，创建一个全为 True 的 mask
+    is_affected = torch.ones(N2, device=device, dtype=torch.bool)
+    
+    # 将不受影响的索引位置设为 False
+    if unaffected_final_ids.numel() > 0:
+        is_affected[unaffected_final_ids] = False
+    
+    # 提取剩下的索引，即为受影响的（包括分裂产生的、克隆产生的、以及位置/尺度被修改过的）
+    affected_final_ids = torch.nonzero(is_affected, as_tuple=False).squeeze(-1)
+
+    return new_optimizer, info, unaffected_final_ids, affected_final_ids
+
+
+@torch.no_grad()
+def densify_and_prune(
+    scene,
+    optimizer,
+    *,
+    keep_new_from_prune: bool = True,  # prune_ids 默认是旧 index 空间；不去 prune 新的
+    elong_thr: float = 5.0,
+    eps: float = 1e-8,
+):
+    """
+    Densify (split) + Prune + Rebuild optimizer.
+
+    densify:
+      - for each old id i in densify_ids:
+          * create one new primitive appended at end
+          * old & new scales /= scale_div
+          * old pos += δ, new pos -= δ (paired jitter)
+          * old & new MLP params random init
+    prune:
+      - remove prune_ids (by default interpreted in old index space)
+    returns:
+      new_optimizer, info, unaffected_ids_final
+    """
+
+    Ssum = scene.stat_sum_w.float()
+    Hhit = scene.stat_hits.float()
+    ratio = Hhit / (Ssum + 1e-12)
+    q99 = torch.quantile(Hhit, 0.99)
+
+    w1 = (Hhit < q99) & (ratio > 500)
+    w2 = (Hhit >= q99) & (ratio > 200)
+    w_transparent = w1 | w2
+    w_small = (Ssum <= 20)
+    w_prune = w_small | w_transparent
+
+
+    device = scene.positions.device
+    N0 = int(scene.num_primitives)
+    S = scene.stat_sum_w.float()
+    E = scene.stat_contrib_count.float()
+    Err = scene.stat_sum_werr.float() / (E + 1e-6)
+    score = S * Err   # ⭐ 核心
+    K = int(0.1 * S.numel())  # top 10%
+    cand_ids = torch.topk(score, k=K).indices
+
+
+    # ---- densify = cand_ids excluding prune
+    keep = ~w_prune[cand_ids]          # (K,) 只在 cand_ids 上索引
+    densify_ids = cand_ids[keep]
+    N = scene.stat_sum_w.numel()
+    w_densify = torch.zeros(N, dtype=torch.bool, device=device)
+    w_densify[densify_ids] = True
+    w_densify.sum()
+
+
+    prune_ids = torch.nonzero(w_prune, as_tuple=False).squeeze(1)
+    densify_ids = torch.nonzero(w_densify, as_tuple=False).squeeze(1)
+    densify_ids = torch.unique(densify_ids)
+    prune_ids   = torch.unique(prune_ids)
+
+
+    # sanitize ranges (old index space)
+    if densify_ids.numel() > 0:
+        if int(densify_ids.min()) < 0 or int(densify_ids.max()) >= N0:
+            raise ValueError(f"densify_ids out of range: [0,{N0-1}]")
+    if prune_ids.numel() > 0:
+        if int(prune_ids.min()) < 0 or int(prune_ids.max()) >= N0:
+            raise ValueError(f"prune_ids out of range (assumed old space): [0,{N0-1}]")
+
+
+    
+    # ==========
+    # 1) DENSIFY (Split vs Clone based on Scale)
+    # ==========
+    K = int(densify_ids.numel())
+    if K > 0:
+        # --- scales statistics ---
+        sc = scene.log_scales.detach().exp()                 # (N,3)
+        smax = sc.max(dim=-1).values                         # (N,)
+        smed = sc.median(dim=-1).values                      # (N,)
+        elong = smax / (smed + eps)                          # (N,)
+        is_elong = elong > elong_thr                         # (N,)
+        typ = torch.quantile(smax, 0.90)                     # scalar
+
+        # 只取 densify 的那部分
+        sc_d   = sc[densify_ids]                             # (K,3)
+        smed_d = smed[densify_ids]                           # (K,)
+        is_elong_d = is_elong[densify_ids]                   # (K,)
+
+        # --- longest axis direction in world ---
+        # 取最长轴是哪一维：0/1/2
+        axis_idx = sc_d.argmax(dim=-1)                       # (K,)
+        # 旋转矩阵
+        R = quat_to_rotmat_wxyz(scene.quats.detach()[densify_ids])  # (K,3,3)
+
+        # 局部基向量 e0/e1/e2 -> world：取 R 的对应列
+        # R[..., :, j] 是第 j 个局部轴在 world 的方向
+        axis_world = R.gather(
+            dim=2,
+            index=axis_idx.view(-1, 1, 1).expand(-1, 3, 1)
+        ).squeeze(-1)                                        # (K,3)
+        axis_world = axis_world / (axis_world.norm(dim=-1, keepdim=True) + 1e-12)
+
+        # --- decide sign using positional Adam exp_avg ---
+        state = optimizer.state.get(scene.positions, None)
+        if state is not None and "exp_avg" in state:
+            m = state["exp_avg"].detach()                    # (N,3)
+            gdir = m[densify_ids]                            # (K,3)
+            gdir = gdir / (gdir.norm(dim=-1, keepdim=True) + 1e-12)
+            # dot > 0 => axis_world 与 gdir 同向；否则取反
+            sign = torch.where((axis_world * gdir).sum(dim=-1, keepdim=True) >= 0,
+                            torch.ones((densify_ids.numel(),1), device=device),
+                            -torch.ones((densify_ids.numel(),1), device=device))
+        else:
+            # 没有 exp_avg 就默认 + 方向（或你也可以随机）
+            sign = torch.ones((densify_ids.numel(),1), device=device)
+
+        # --- offset magnitude d ---
+        # 经验上：细长的用 smed 驱动（更稳），并 clamp 到 0.3*typ
+        max_offset = 0.3 * typ
+        # normal 的也可以 clamp 到同一个 max_offset，避免飞
+        # 你也可以加一个 min_offset 防止几乎不动：
+        min_offset = 1e-4 * typ
+        d_elong  = torch.clamp(0.5 * smed_d, min=min_offset, max=max_offset)  # (K,)
+        r_normal = sc_d.max(dim=-1).values                                  # (K,)
+        d_normal = torch.clamp(0.5 * r_normal, min=min_offset, max=max_offset) # (K,)
+        d = torch.where(is_elong_d, d_elong, d_normal).view(-1, 1)             # (K,1)
+        pos_old = scene.positions.detach()[densify_ids]        # (K,3)
+        pos_new = pos_old + sign * axis_world * d              # (K,3)
+
+        # --- new properties ---
+        positions_new = torch.cat([scene.positions.data, pos_new], dim=0)
+        
+        log_scales_old = scene.log_scales.data
+        log_scales_app = log_scales_old[densify_ids].clone()
+        log_scales_new = torch.cat([log_scales_old, log_scales_app], dim=0)
+        shrink = math.log(5.0)
+        m_old = log_scales_new[densify_ids].median(dim=-1).values   # (K,)
+        log_scales_new[densify_ids] = m_old[:, None].expand(-1, 3)  # (K,3)
+        log_scales_new[densify_ids] -= shrink                       # /5
+        m_new = log_scales_new[N0:N0+K].median(dim=-1).values       # (K,)
+        log_scales_new[N0:N0+K] = m_new[:, None].expand(-1, 3)      # (K,3)
+        log_scales_new[N0:N0+K] -= shrink                           # /5
+
+        quats_old      = scene.quats.data
+        quats_app      = quats_old[densify_ids].clone()
+        quats_new      = torch.cat([quats_old, quats_app],      dim=0)
+
+        # ---- 3) append MLP params (NO helper functions) ----
+        # 假设 scene.W1..b3 的 shape 已经是正确的：
+        #   W1: (N0, H, IN)
+        #   b1: (N0, H)
+        #   W2: (N0, H, H)
+        #   b2: (N0, H)
+        #   W3: (N0, OUT, H)   # OUT 通常是 4 (rgb+sigma) 或 3/4，按你项目实际
+        #   b3: (N0, OUT)
+        std = 0.01
+        dtype = scene.W1.dtype
+        device = scene.W1.device
+        new_ids = torch.arange(N0, N0 + K, device=device, dtype=torch.long)
+        touched = torch.cat([densify_ids, new_ids], dim=0)
+        W1_app = torch.randn((K,) + scene.W1.shape[1:], device=device, dtype=dtype) * std
+        b1_app = torch.zeros((K,) + scene.b1.shape[1:], device=device, dtype=dtype)
+        W2_app = torch.randn((K,) + scene.W2.shape[1:], device=device, dtype=dtype) * std
+        b2_app = torch.zeros((K,) + scene.b2.shape[1:], device=device, dtype=dtype)
+        W3_app = torch.randn((K,) + scene.W3.shape[1:], device=device, dtype=dtype) * std
+        b3_app = torch.zeros((K,) + scene.b3.shape[1:], device=device, dtype=dtype)
+
+
+        W1_new = torch.cat([scene.W1.data, W1_app], dim=0)
+        b1_new = torch.cat([scene.b1.data, b1_app], dim=0)
+        W2_new = torch.cat([scene.W2.data, W2_app], dim=0)
+        b2_new = torch.cat([scene.b2.data, b2_app], dim=0)
+        W3_new = torch.cat([scene.W3.data, W3_app], dim=0)
+        b3_new = torch.cat([scene.b3.data, b3_app], dim=0)
+
+
+        W1_new[touched] = torch.randn_like(W1_new[touched]) * std
+        b1_new[touched] = 0
+        W2_new[touched] = torch.randn_like(W2_new[touched]) * std
+        b2_new[touched] = 0
+        W3_new[touched] = torch.randn_like(W3_new[touched]) * std
+        b3_new[touched] = 0
+
+        # ---- 4) 写回 scene（用新 Parameter 替换）----
+        scene.positions  = nn.Parameter(positions_new, requires_grad=True)
+        scene.log_scales = nn.Parameter(log_scales_new, requires_grad=True)
+        scene.quats      = nn.Parameter(quats_new, requires_grad=True)
+
+        scene.W1 = nn.Parameter(W1_new, requires_grad=True)
+        scene.b1 = nn.Parameter(b1_new, requires_grad=True)
+        scene.W2 = nn.Parameter(W2_new, requires_grad=True)
+        scene.b2 = nn.Parameter(b2_new, requires_grad=True)
+        scene.W3 = nn.Parameter(W3_new, requires_grad=True)
+        scene.b3 = nn.Parameter(b3_new, requires_grad=True)
+
+        scene.num_primitives = int(scene.positions.shape[0])
+
+    N1 = int(scene.num_primitives)
+
+    # ==========
+    # 2) PRUNE
+    # ==========
+    if prune_ids.numel() > 0:
+        # prune_ids assumed in OLD index space [0, N0)
+        # after densify, old indices are still [0, N0), new are [N0, N0+K)
+        # optionally keep new always
+        if keep_new_from_prune:
+            prune_ids_eff = prune_ids
+        else:
+            prune_ids_eff = prune_ids  # (or allow passing new ids separately)
+
+        keep = torch.ones(N1, device=device, dtype=torch.bool)
+        keep[prune_ids_eff] = False
+
+        scene.positions  = nn.Parameter(scene.positions.data[keep])
+        scene.log_scales = nn.Parameter(scene.log_scales.data[keep])
+        scene.quats = nn.Parameter(scene.quats.data[keep])
+
+        scene.W1 = nn.Parameter(scene.W1.data[keep])
+        scene.b1 = nn.Parameter(scene.b1.data[keep])
+        scene.W2 = nn.Parameter(scene.W2.data[keep])
+        scene.b2 = nn.Parameter(scene.b2.data[keep])
+        scene.W3 = nn.Parameter(scene.W3.data[keep])
+        scene.b3 = nn.Parameter(scene.b3.data[keep])
+
+        scene.num_primitives = int(scene.positions.shape[0])
+
+    N2 = int(scene.num_primitives)  # final
+
+    # ==========
+    # 3) REBUILD OPTIMIZER (with Stage 1 Strategy)
+    # ==========
+    optimizer = torch.optim.Adam([
+        {"params": [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]},  # 默认 1e-3
+        {"params": scene.log_scales, "lr": 1e-2},
+        {"params": scene.positions, "lr": 1e-4},
+        {"params": scene.quats, "lr": 1e-3},
+        #{"params": scene.rotations, "lr": 1e-2},
+    ], lr=1e-3)
+
+    # ==========
+    # 4) RETURN UNAFFECTED IDS (final index space)
+    # ==========
+    # “unaffected” means: old primitives not densified and not pruned.
+    # Compute in old space first, then map through final keep-mask.
+    unaffected_old = torch.ones(N0, device=device, dtype=torch.bool)
+    if densify_ids.numel() > 0:
+        unaffected_old[densify_ids] = False
+    if prune_ids.numel() > 0:
+        unaffected_old[prune_ids] = False
+    unaffected_old_ids = torch.nonzero(unaffected_old, as_tuple=False).squeeze(-1)  # in [0,N0)
+
+    # Map old ids -> final ids: after pruning, indices compress.
+    # We can rebuild a mapping by simulating final keep mask on the *post-densify* index space.
+    # Construct keep mask on N1, then compute new indices via cumsum.
+    # If no pruning happened, mapping is identity for old ids.
+    if prune_ids.numel() == 0:
+        unaffected_final_ids = unaffected_old_ids
+    else:
+        # keep mask used during prune: keep[prune_ids]=False, keep[new]=True
+        keepN1 = torch.ones(N1, device=device, dtype=torch.bool)
+        keepN1[prune_ids] = False
+        # new index = cumsum(keep)-1 for kept entries
+        new_index = torch.cumsum(keepN1.to(torch.int64), dim=0) - 1
+        unaffected_final_ids = new_index[unaffected_old_ids]
+
+    info = {
+        "N0": N0,
+        "densified": int(K),
+        "pruned": int(prune_ids.numel()),
+        "N_final": N2,
+    }
+
+    # ==========
+    # 5) COMPUTE AFFECTED IDS (final index space)
+    # ==========
+    # 在最终的 N2 长度空间中，创建一个全为 True 的 mask
+    is_affected = torch.ones(N2, device=device, dtype=torch.bool)
+    
+    # 将不受影响的索引位置设为 False
+    if unaffected_final_ids.numel() > 0:
+        is_affected[unaffected_final_ids] = False
+    
+    # 提取剩下的索引，即为受影响的（包括分裂产生的、克隆产生的、以及位置/尺度被修改过的）
+    affected_final_ids = torch.nonzero(is_affected, as_tuple=False).squeeze(-1)
+
+    return optimizer, info, unaffected_final_ids, affected_final_ids
+
 
 
 
@@ -481,36 +901,58 @@ def zero_grads_for_ids(scene, fixed_ids):
         return
     fixed_ids = fixed_ids.to(scene.positions.device)
 
-    for p in [scene.positions, scene.log_scales, scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]:
+    for p in [scene.positions, scene.log_scales, scene.quats, scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3]:
         if p.grad is None:
             continue
-        #p.grad[fixed_ids] = 0
+        p.grad[fixed_ids] = 0
 
 
 
 
+@torch.no_grad()
+def compute_multi_view_score(scene, dataset, idxs, threshold=0.05):
+    scene.reset_w_stats()
+    scene.eval()
+
+    device = "cuda"
+    for img_idx in tqdm(idxs):
+        # ---------------- Load data ----------------
+        rays_o_hw, rays_d_hw, img_hw3, pose = dataset[img_idx]
+        Himg, Wimg = img_hw3.shape[0], img_hw3.shape[1]
+        scene.set_image_size(Wimg, Himg)
+
+        rays_o_batch = rays_o_hw.reshape(-1, 3).to(device, non_blocking=True)
+        rays_d_batch = rays_d_hw.reshape(-1, 3).to(device, non_blocking=True)
+
+        view_matrix = _c2w_to_view_matrix(pose, device=device)
+        proj_matrix = _build_projection_from_focal(dataset.focal, Wimg, Himg, device=device)
+
+
+        _, _ = scene.render_rgb_alpha_no_grad(
+            rays_o_batch, rays_d_batch,
+            score_threshold=1e-3,
+            bg_color=torch.zeros(3, device=device),
+            view_matrix=view_matrix,
+            proj_matrix=proj_matrix,
+            collect_w_stats=True,
+        )
 
 
 
+    sum_w = scene.stat_sum_w.detach().float().reshape(-1) 
+    hits  = scene.stat_hits.detach().float().reshape(-1) 
+    hits = torch.clamp(hits, min=1.0)  # 防止除零
 
 
+    scales = torch.exp(scene.log_scales).reshape(-1)  # 只保留有效项的scales
+    w = (sum_w / hits) * (scales) * (scales)# 只保留有效项
+    N = w.numel()
+    k = int(threshold * N)   # 前10%
 
+    w_sorted, sorted_idx = torch.sort(w)   # 升序
+    smallest_idx = sorted_idx[:k]                # 前10%最小
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return smallest_idx.cpu()  # 返回 CPU 上的索引
 
 
 
@@ -1012,3 +1454,36 @@ def densify_tilecuda_stage1_from_worst_tiles(
         scene, pts, k=add_k,
         pos_jitter=pos_jitter,
     )
+
+
+@torch.no_grad()
+def quat_to_rotmat_wxyz(q: torch.Tensor) -> torch.Tensor:
+    """
+    q: (...,4) in (w,x,y,z)
+    return: (...,3,3)
+    """
+    q = F.normalize(q, dim=-1)
+    w, x, y, z = q.unbind(dim=-1)
+
+    ww = w*w; xx = x*x; yy = y*y; zz = z*z
+    wx = w*x; wy = w*y; wz = w*z
+    xy = x*y; xz = x*z; yz = y*z
+
+    r00 = 1 - 2*(yy + zz)
+    r01 = 2*(xy - wz)
+    r02 = 2*(xz + wy)
+
+    r10 = 2*(xy + wz)
+    r11 = 1 - 2*(xx + zz)
+    r12 = 2*(yz - wx)
+
+    r20 = 2*(xz - wy)
+    r21 = 2*(yz + wx)
+    r22 = 1 - 2*(xx + yy)
+
+    R = torch.stack([
+        torch.stack([r00, r01, r02], dim=-1),
+        torch.stack([r10, r11, r12], dim=-1),
+        torch.stack([r20, r21, r22], dim=-1),
+    ], dim=-2)
+    return R

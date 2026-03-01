@@ -18,6 +18,7 @@ from vmodel import NeuralPrimitiveScene
 from mip360_loader import mip360Dataset
 from save_model import save_model
 from pruning_densification import *
+from utils.loss_utils import *
 
 
 
@@ -55,6 +56,7 @@ def train_scene_llff(
     lr=1e-3,
     device='cuda',
     initial_num_primitives=1024,
+    min_points = 35,
     engine: str = "vmodel",
     tile_order: str = "per_pixel",
 ):
@@ -70,7 +72,7 @@ def train_scene_llff(
     # Set saving directory
     os.makedirs(output_root, exist_ok=True)
     random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
-    random_tag = "delta_b"  # for debugging
+    #random_tag = "15359"  # for debugging
     output_dir = os.path.join(output_root, random_tag)
     os.makedirs(output_dir, exist_ok=True)
 
@@ -88,6 +90,7 @@ def train_scene_llff(
             hidden_dim=32,
             pe_frequencies=6,
             initial_positions=dataset.positions,
+            min_points=min_points
         ).to(device)
         # ensure tile order mode for this run
         os.environ["MLPSP_TILE_ORDER"] = str(tile_order)
@@ -103,10 +106,10 @@ def train_scene_llff(
 
     """
     # 加载已有 checkpoint 权重
-    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/2183/scene_epoch_176000.pt"
+    model_ckpt_path = "/home/yuzhou/Desktop/output/mip360/15581/scene_epoch_142000.pt"
     if os.path.exists(model_ckpt_path):
         ckpt = torch.load(model_ckpt_path, map_location=device)
-        scene.load_state_dict(ckpt)
+        scene.load_state_dict(ckpt, strict=False)
         print(f"[Checkpoint] Loaded model from {model_ckpt_path}")
     """
 
@@ -115,13 +118,49 @@ def train_scene_llff(
     else:
         mlp_params = list(scene.mlps.parameters())
 
+    """
     optimizer = torch.optim.Adam([
         {"params": mlp_params},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 1e-2},
-        {"params": scene.positions, "lr": 1e-4},
+        {"params": scene.log_scales, "lr": 5e-3},
+        {"params": scene.positions, "lr": 2e-4},
         #{"params": scene.rotations, "lr": 1e-2},
     ], lr=1e-3)
+    """
 
+
+
+    start_decay = 80000
+    total_iters = 110000
+
+    base_lrs  = [1e-3, 1e-2, 1e-4, 1e-3]
+    min_mults = [1e-2, 0.2, 0.3, 0.2]   # 终点倍率（相对各自 base_lr）
+
+    def late_cosine_mult(step, min_mult):
+        # 0 ~ start_decay: 完全不变
+        if step < start_decay:
+            return 1.0
+
+        # start_decay ~ total_iters: cosine 到 min_mult
+        t = (step - start_decay) / max(1, (total_iters - start_decay))
+        t = min(max(t, 0.0), 1.0)
+        return min_mult + 0.5 * (1.0 - min_mult) * (1.0 + math.cos(math.pi * t))
+
+    optimizer = torch.optim.Adam([
+        {"params": mlp_params,        "lr": base_lrs[0]},
+        {"params": scene.log_scales,  "lr": base_lrs[1]},
+        {"params": scene.positions,   "lr": base_lrs[2]},
+        {"params": scene.quats,       "lr": base_lrs[3]},
+    ])
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=[
+            lambda s: late_cosine_mult(s, min_mults[0]),
+            lambda s: late_cosine_mult(s, min_mults[1]),
+            lambda s: late_cosine_mult(s, min_mults[2]),
+            lambda s: late_cosine_mult(s, min_mults[3]),
+        ]
+    )
 
     #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
 
@@ -180,7 +219,18 @@ def train_scene_llff(
     fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
 
 
+
+    """
+    with torch.no_grad():
+        for i in range(scene.num_primitives):
+            scene.b3[i, 3] = 2.1972
+    """
     for epoch in tqdm(range(num_epochs)):
+        """
+        if epoch % 500 == 0:
+            print(torch.min(scene.b3[:, 3]), torch.max(scene.b3[:, 3]), torch.mean(scene.b3[:, 3]))
+            print(torch.min(scene.b3[:, :3]), torch.max(scene.b3[:, :3]), torch.mean(scene.b3[:, :3]))
+        """
         wall_start = time.perf_counter() if timing_enabled and (epoch % timing_every == 0) else None
         data_start = wall_start
 
@@ -256,6 +306,7 @@ def train_scene_llff(
             torch.cuda.profiler.start()
             profiler_active = True
 
+
         with _nvtx_range(f"train/step_{epoch}"):
             optimizer.zero_grad()                       # 1. Clear gradients
             if engine == "tile_cuda":
@@ -270,8 +321,51 @@ def train_scene_llff(
             else:
                 with _nvtx_range("train/forward_vmodel"):
                     pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
-            loss = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
-            #loss = F.l1_loss(pred, rgbs_batch)
+            loss_mse = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
+
+            H, W = Himg, Wimg
+            # reshape to BCHW for SSIM
+            pred_img = pred.view(H, W, 3).permute(2, 0, 1).unsqueeze(0)      # (1,3,H,W)
+            gt_img   = rgbs_batch.view(H, W, 3).permute(2, 0, 1).unsqueeze(0)# (1,3,H,W)
+            # L1 can stay flattened OR use images; either is fine
+            l1 = F.l1_loss(pred, rgbs_batch)  # scalar
+            # SSIM similarity in [0,1]
+            ssim_val = ssim(pred_img, gt_img)
+            # 3DGS-style combined loss: (1-λ)*L1 + λ*(1-SSIM)
+            lambda_dssim = 0.1
+            loss = (1.0 - lambda_dssim) * l1 + lambda_dssim * (1.0 - ssim_val) 
+
+            def compute_repulsive_loss(scene, affected_ids, multiplier=0.1):
+                if affected_ids.numel() < 2:
+                    return torch.tensor(0.0, device=affected_ids.device)
+
+                # 提取受影响点的坐标和尺度
+                pos = scene.positions[affected_ids]  # (K, 3)
+                # 假设 log_scales 是 (N, 1) 或 (N, 3)，取平均半径或最大半径
+                scales = torch.exp(scene.log_scales[affected_ids]).mean(dim=-1) # (K,)
+
+                # 计算两两之间的距离平方 (K, K)
+                # dist_sq = |p_i|^2 + |p_j|^2 - 2 p_i·p_j
+                dist_sq = torch.cdist(pos, pos, p=2)**2
+
+                # 计算临界距离平方 (s_i + s_j)^2
+                # 使用 broadcasting 得到 (K, K) 的半径和矩阵
+                s_sum = scales[:, None] + scales[None, :]
+                s_sum_sq = s_sum**2
+
+                # 计算高斯排斥核
+                # 当距离越小，loss 越大；当距离大于半径之和时，迅速衰减
+                repulsion = torch.exp(-dist_sq / (2 * s_sum_sq + 1e-8))
+
+                # 去掉对角线（自己对自己的排斥）
+                mask = torch.eye(len(affected_ids), device=affected_ids.device).bool()
+                repulsion = repulsion.masked_fill(mask, 0)
+
+                return repulsion.mean() * multiplier
+            
+            if (epoch % 5000 > 10000000000000) and (epoch % 5000 < 1000) and (epoch < 20000):
+                repulsive_loss = compute_repulsive_loss(scene, affected_ids, multiplier=0.01)
+                loss += repulsive_loss
 
             if wall_start is not None and torch.cuda.is_available():
                 fwd_end.record()
@@ -293,6 +387,7 @@ def train_scene_llff(
 
         zero_grads_for_ids(scene, fixed_ids)
         optimizer.step()
+        scheduler.step()
 
         if wall_start is not None and torch.cuda.is_available():
             opt_end.record()
@@ -318,7 +413,7 @@ def train_scene_llff(
             )
 
         # Accumulate loss
-        loss_accum += loss.item()
+        loss_accum += loss_mse.item()
         loss_count += 1
 
         # Print average loss every 100 epochs
@@ -334,56 +429,35 @@ def train_scene_llff(
                 loss_accum = 0.0
                 loss_count = 0
 
-        if (engine == "tile_cuda") and (epoch % 5000 == 0) and (epoch > 0):
+        """
+        if epoch == 99:
+            torch.save(scene.state_dict(), os.path.join(output_dir, "before_pruning.pt"))
+
+        if (epoch == 1):
+            scene.reset_w_stats()
+            for img_idx in tqdm(range(len(dataset))):
+                # ---------------- Load data ----------------
+                rays_o_hw, rays_d_hw, img_hw3, pose = dataset[img_idx]
+                Himg, Wimg = img_hw3.shape[0], img_hw3.shape[1]
+                scene.set_image_size(Wimg, Himg)
+                rays_o_batch = rays_o_hw.reshape(-1, 3).to(device, non_blocking=True)
+                rays_d_batch = rays_d_hw.reshape(-1, 3).to(device, non_blocking=True)
+                rgbs_batch = img_hw3.reshape(-1, 3).to(device, non_blocking=True)
+                view_matrix = _c2w_to_view_matrix(pose, device=device)
+                proj_matrix = _build_projection_from_focal(dataset.focal, Wimg, Himg, device=device)
+
+                pred, _ = scene.render_rgb_alpha_no_grad(
+                    rays_o_batch, rays_d_batch,
+                    score_threshold=1e-3,
+                    bg_color=torch.zeros(3, device=device),
+                    view_matrix=view_matrix,
+                    proj_matrix=proj_matrix,
+                    collect_w_stats=True,
+                    gt_rgb=rgbs_batch,
+                )
+        """
+        if (engine == "tile_cuda") and (epoch == -200):
             """
-            tile_results = sample_worst_tiles_l1(
-                scene, dataset,
-                k_images=100,
-                m_tiles=20,
-                tile_size=32,
-                score_threshold=1e-3,
-                bg_color=torch.zeros(3, device="cuda"),
-                seed=0,
-            )
-
-            sampled_ids = [r["img_idx"] for r in tile_results]
-            print(sampled_ids)
-
-            torch.save(tile_results, os.path.join(output_dir, "tile_results.pt"))
-
-            #print(f"[Tile Results] {tile_results}")
-            pointcloud_xyz = tiles_to_points_from_tmap(
-                scene, dataset,
-                tile_results,
-                tile_size=32,
-                score_threshold=1e-3,
-                bg_color=torch.zeros(3, device="cuda"),
-                alpha_min=1e-10,
-            )
-
-            # 你已有的 densify 接口直接吃 (M,3)
-            stats = densify_tilecuda_from_pointcloud_random(scene, pointcloud_xyz, DENSIFY_K)
-
-            
-            
-            stats = densify_tilecuda_stage1_from_worst_tiles(
-            scene, dataset,
-            k_images=100, m_tiles=20, tile_size=32,
-        )
-
-            torch.save(scene.state_dict(), os.path.join(output_dir, "after_densification.pt"))
-            did_densify = True
-            print(f"[densify] {stats}")
-
-            # 跑通优先：重建 optimizer，让新增 Parameter 被优化
-            optimizer = torch.optim.Adam([
-                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
-                {'params': [scene.log_scales], 'lr': 1e-2},
-                {'params': [scene.positions], 'lr': 1e-4},
-            ])
-            print("[densify] optimizer rebuilt.")
-            """
-
             densify_scores = compute_multiview_densify_scores(
                 scene, dataset,
                 k_images=20,
@@ -394,9 +468,12 @@ def train_scene_llff(
             )
 
             # 例如：选 score > densify_thr 的 primitives 作为 densify target（覆盖多视角高误差区域）
-            densify_thr = 500.0
+            densify_thr = 2000.0
             densify_ids = torch.nonzero(densify_scores > densify_thr, as_tuple=False).squeeze(-1)
+            """
+            #densify_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device) 
 
+            """
             prune_scores = compute_multiview_prune_scores(
                 scene, dataset,
                 k_images=20,
@@ -405,30 +482,45 @@ def train_scene_llff(
                 chunk_prims=128,
                 seed=0,
             )
-            prune_thr = 0.9
+            prune_thr = 0.8
             prune_ids = torch.nonzero(prune_scores > float(prune_thr), as_tuple=False).squeeze(-1)
-            densify_prune_tilecuda_and_rebuild_optimizeroptimizer, info, fixed_ids = densify_prune_tilecuda_and_rebuild_optimizer(
+            prune_ids = torch.cat([prune_ids, get_prune_ids_by_scale(scene, threshold=1)])
+            prune_ids = torch.unique(prune_ids)
+            """
+
+            """
+            idxs = torch.randperm(len(dataset))[:] 
+            prune_ids = compute_multi_view_score(scene, dataset, idxs, threshold=0.025)
+
+
+            optimizer_, info, fixed_ids, affected_ids = densify_prune_tilecuda_and_rebuild_optimizer(
                 scene, optimizer,
                 densify_ids=densify_ids,   # 旧空间 ids
                 prune_ids=prune_ids,       # 旧空间 ids（高分删）
                 init_std=0.01,
                 jitter_frac=0.10,
-                scale_div=2.0,
+                scale_threshold=0.02, # scale > threshold => split; else clone  
+                scale_div=1.5,
             )
-            print(info)
-
-            optimizer = torch.optim.Adam([
-                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
-                {'params': [scene.log_scales], 'lr': 1e-2},
-                {'params': [scene.positions], 'lr': 1e-4},
-            ])
+            """
+            optimizer, info, fixed_ids, affected_ids = densify_and_prune(scene, optimizer)
+            optimizer.zero_grad(set_to_none=True)
+            scene.reset_w_stats()
+            print(info, affected_ids)
             torch.save(scene.state_dict(), os.path.join(output_dir, "after_pruning.pt"))
-
-            did_densify = True
         
-        if epoch % 5000 == 500 and epoch > 500:
-            fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
 
+        """
+        if epoch % 5000 == 1000 and epoch < 20000:
+            # 在 train.py 的循环中
+            print("--- Stage 2: Restoring learning rates for full optimization ---")
+            for g in optimizer.param_groups:
+                if g['name'] == "log_scales":
+                    g['lr'] /= 1  # 恢复原始 Scale LR
+                if g['name'] == "positions":
+                    g['lr'] /= 1  # 恢复原始 Position LR
+            fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
+        """
 
         # Eval after 500 epochs
         if (epoch + 1) % 500 == 0:

@@ -22,6 +22,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_epochs", type=int, default=800000)
     parser.add_argument("--batch_size", type=int, default=12000, help="Used by vmodel engine (random rays).")
     parser.add_argument("--initial_num_primitives", type=int, default=2183)
+    parser.add_argument("--min_points", type=int, default=35)
     parser.add_argument("--seed", type=int, default=2025)
     parser.add_argument(
         "--engine",
@@ -48,6 +49,7 @@ if __name__ == "__main__":
         initial_num_primitives=args.initial_num_primitives,
         engine=args.engine,
         tile_order=args.tile_order,
+        min_points=args.min_points
     )
     
 

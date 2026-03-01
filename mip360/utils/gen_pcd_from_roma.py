@@ -199,7 +199,7 @@ def extract_keypoints_and_colors(imA, imB_compound, certainties_max, certainties
 
 def triangulate_points(P1, P2, k1_x, k1_y, k2_x, k2_y, device="cuda"):
     """
-    批量线性三角化 + 同时计算两个视角的重投影误差（EDGS 风格需要）
+    批量线性三角化 + 同时计算两个视角的重投影误差(EDGS 风格需要）
     返回:
       X_h: (N,4) 齐次坐标
       err1, err2: numpy (N,) 重投影误差
@@ -241,7 +241,7 @@ def triangulate_points(P1, P2, k1_x, k1_y, k2_x, k2_y, device="cuda"):
 
 def select_best_keypoints(NNs_triangulated_points, NNs_errors_proj1, NNs_errors_proj2, device="cuda"):
     """
-    从多个邻居的三角化结果里，选择投影误差（max(err1,err2)）最小的那个。
+    从多个邻居的三角化结果里, 选择投影误差(max(err1,err2)）最小的那个。
     Inputs:
       NNs_triangulated_points: torch (Nn, M, 4)
       NNs_errors_proj1: numpy (Nn, M)
@@ -371,7 +371,7 @@ def main():
     ap.add_argument("--image_root", type=str, required=True, help="图像目录（与 images.txt 的相对路径一致）")
     ap.add_argument("--out_ply", type=str, default="roma_points.ply", help="输出点云路径")
     ap.add_argument("--roma_model", type=str, default="outdoors", choices=["indoors", "outdoors"])
-    ap.add_argument("--num_refs", type=int, default=180, help="参考帧数量（K-means 选）")
+    ap.add_argument("--num_refs", type=int, default=180, help="参考帧数量(K-means 选）")
     ap.add_argument("--nns_per_ref", type=int, default=3, help="每个参考帧使用的最近邻数量")
     ap.add_argument("--matches_per_ref", type=int, default=15000, help="每个参考帧抽样的像素/匹配数量")
     ap.add_argument("--proj_err_tolerance", type=float, default=0.01, help="重投影误差阈值（像素）")

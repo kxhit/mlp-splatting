@@ -1,10 +1,206 @@
 import torch
 import matplotlib.pyplot as plt
-from model import NeuralPrimitiveScene
-import os
-import imageio
-import numpy as np
+import gc
+from mip360_loader import mip360Dataset
+from vmodel import NeuralPrimitiveScene
 from tqdm import tqdm
+
+fig = None
+ax0_img = None
+ax1_img = None
+
+@torch.no_grad()
+def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
+    global fig, ax0_img, ax1_img
+    dataset = mip360Dataset(data_dir, split='test')
+
+    total = 0.0
+
+    scene = NeuralPrimitiveScene(N, hidden_dim=32, pe_frequencies=6).to(device)
+    # ---------------- Load model ----------------
+    
+    if model_ckpt:
+        scene.load_state_dict(model_ckpt)
+
+    if mlp_idx is not None:
+        scene.num_primitives = len(mlp_idx)
+        scene.mlps = torch.nn.ModuleList([scene.mlps[i] for i in mlp_idx])
+        scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
+        scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
+
+
+    
+    # Debug scales
+    scales = torch.exp(scene.log_scales)
+
+    import numpy as np
+    scales_np = scales.detach().cpu().numpy()
+
+    plt.figure(figsize=(6,4))
+
+    # 这里 bins=200，比原来的 50 多很多
+    bins = np.logspace(-4, 1, 200)  
+
+    plt.hist(scales_np, bins=bins, color='blue', alpha=0.7, edgecolor='black')
+
+    plt.xscale("log")
+    plt.xlabel("Scale value")
+    plt.ylabel("Count")
+    plt.title("Histogram of scales")
+
+    # 设置固定的 x 轴刻度
+    plt.xticks([0.001, 0.01, 0.1, 1, 10], labels=["0.001", "0.01", "0.1", "1", "10"])
+
+    plt.grid(True, which="both", ls="--", alpha=0.5)
+    plt.tight_layout()
+    plt.show()
+
+    print('Scene scales ', scales)
+    print('Number of scales in total', len(scales))
+    print('Number of scales > 1:', (scales > 1).sum().item())
+    print('Number of 0.005 < scales < 0.01:', ((scales > 0.005) & (scales < 0.01)).sum().item())
+    print('Number of 0.001 < scales < 0.005:', ((scales > 0.001) & (scales < 0.005)).sum().item())
+    print('Number of scales < 0.001:', (scales < 0.001).sum().item())
+
+    for img_idx in tqdm(range(len(dataset))):
+        # ---------------- Load data ----------------
+        rays_o, rays_d, rgbs, pose = dataset[img_idx]
+        rays_o = rays_o.to(device).view(-1, 3)
+        rays_d = rays_d.to(device).view(-1, 3)
+        gt_rgb = rgbs.to(device).view(-1, 3)
+
+        # ---------------- Predict in batches ----------------
+        batch_size = 3000
+        pred_rgb_chunks = []
+        for i in range(0, rays_o.shape[0], batch_size):
+            chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
+            pred_rgb_chunks.append(chunk_pred)
+            del chunk_pred
+            torch.cuda.empty_cache()
+
+        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
+        del pred_rgb_chunks
+
+        #print('invalid num ', scene.invalid_nums)
+
+        # ---------------- Reshape & compute PSNR ----------------
+        #pred_img = pred_rgb.view(1, 1039, 1559, 3).clamp(0, 1)
+        #gt_img = gt_rgb.cpu().view(1, 1039, 1559, 3)
+
+        pred_img = pred_rgb.view(1, 260, 390, 3).clamp(0, 1)
+        gt_img = gt_rgb.cpu().view(1, 260, 390, 3)
+        psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
+
+        print(f"\rImage {img_idx}: PSNR = {psnr:.2f} dB", end="", flush=True)
+
+        # ---------------- Visualization ----------------
+
+
+        if fig is None:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            ax0_img = axes[0].imshow(gt_img[0].numpy())
+            axes[0].set_title("Ground Truth")
+            ax1_img = axes[1].imshow(pred_img[0].numpy())
+            axes[1].set_title(f"Prediction (PSNR: {psnr:.2f} dB)")
+            plt.tight_layout()
+            plt.ion()
+            plt.show()
+        else:
+            ax0_img.set_data(gt_img[0].numpy())
+            ax1_img.set_data(pred_img[0].numpy())
+            ax1_img.axes.set_title(f"Prediction (PSNR: {psnr:.2f} dB)")
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+
+
+        total += psnr
+        plt.pause(0.01)
+        
+
+    print("Average PSNR:", total / len(dataset))
+
+
+
+@torch.no_grad()
+def evaluate_and_visualize(data_dir, model_ckpt=None, N=1024, device='cuda', block=False, mlp_idx=None):
+    global fig, ax0_img, ax1_img
+    dataset = mip360Dataset(data_dir, split='test')
+
+    scene = NeuralPrimitiveScene(N, hidden_dim=32, pe_frequencies=6).to(device)
+    # ---------------- Load model ----------------
+    
+    if model_ckpt:
+        scene.load_state_dict(model_ckpt)
+
+    if mlp_idx is not None:
+        scene.num_primitives = len(mlp_idx)
+        scene.mlps = torch.nn.ModuleList([scene.mlps[i] for i in mlp_idx])
+        scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
+        scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
+
+
+    total = 0.0
+    for img_idx in tqdm(range(len(dataset))):
+        rays_o, rays_d, rgbs, pose = dataset[img_idx]
+        rays_o = rays_o.to(device).view(-1, 3)
+        rays_d = rays_d.to(device).view(-1, 3)
+        gt_rgb = rgbs.to(device).view(-1, 3)
+
+        batch_size = 2500
+        pred_depth_chunks = []
+        pred_rgb_chunks = []
+        for i in range(0, rays_o.shape[0], batch_size):
+            chunk_rgb, chunk_depth = scene.forward_depth(
+                rays_o[i:i+batch_size],
+                rays_d[i:i+batch_size],
+                pose.to(device)   # T_cw
+            )
+            chunk_rgb = chunk_rgb.cpu()
+            chunk_depth = chunk_depth.cpu()
+            pred_depth_chunks.append(chunk_depth)
+            pred_rgb_chunks.append(chunk_rgb)
+            del chunk_depth
+            del chunk_rgb
+            torch.cuda.empty_cache()
+
+        pred_depth = torch.cat(pred_depth_chunks, dim=0)
+        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
+        H, W = 259, 389
+        pred_depth_img = pred_depth.view(H, W).cpu().numpy()
+
+
+        pred_img = pred_rgb.view(1, H, W, 3).clamp(0, 1)
+        gt_img = gt_rgb.cpu().view(1, H, W, 3)
+        psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
+        total += psnr
+        # 可视化 Depth (固定范围 0–5)
+        if img_idx == 0:
+            fig_depth, axes = plt.subplots(1, 2, figsize=(12, 5))
+            ax_depth = axes[0]
+            depth_img_artist = ax_depth.imshow(
+                pred_depth_img,
+                cmap="jet",   # 你可以换成 viridis / plasma / cividis
+                #vmin=0.0,         # 最小深度
+                #vmax=7.0          # 最大深度
+            )
+            ax_depth.set_title("Predicted Depth")
+            plt.colorbar(depth_img_artist, ax=ax_depth)
+            ax_rgb = axes[1]
+            rgb_img_artist = ax_rgb.imshow(pred_img[0].numpy())
+            ax_rgb.set_title("Predicted RGB")
+            plt.tight_layout()
+            plt.ion()
+            plt.show()
+        else:
+            depth_img_artist.set_data(pred_depth_img)
+            rgb_img_artist.set_data(pred_img[0].numpy())
+            fig_depth.canvas.draw()
+            fig_depth.canvas.flush_events()
+
+
+        plt.waitforbuttonpress()
+    # plt.pause(10)
+    print("Average PSNR:", total / len(dataset))
 
 
 """
@@ -81,89 +277,3 @@ def viz(pred_img, gt_img, mlp_idx, img_idx, scale, output_dir, block=False):
     #plt.savefig("img_{img_idx}_mlp_{mlp_idx}.png".format(img_idx=img_idx, mlp_idx=mlp_idx if mlp_idx is not None else "all"))
     plt.show(block=block)
 """
-
-import torch
-import matplotlib.pyplot as plt
-import gc
-from model import NeuralPrimitiveScene
-from synthetic_loader import SyntheticDataset
-
-fig = None
-ax0_img = None
-ax1_img = None
-
-@torch.no_grad()
-def evaluate_and_visualize(data_dir, scene_name, model_ckpt=None, N=1024, device='cuda', split="test", mlp_idx=None):
-    global fig, ax0_img, ax1_img
-    dataset = SyntheticDataset(scene_name, split=split)
-
-    total = 0.0
-
-    for img_idx in range(300):
-        # ---------------- Load data ----------------
-        rays_o, rays_d, rgbs = dataset[img_idx]
-        rays_o = rays_o.to(device).view(-1, 3)
-        rays_d = rays_d.to(device).view(-1, 3)
-        gt_rgb = rgbs.to(device).view(-1, 3)
-
-        # ---------------- Load model ----------------
-        scene = NeuralPrimitiveScene(N).to(device)
-        if model_ckpt:
-            scene.load_state_dict(model_ckpt)
-        if mlp_idx is not None:
-            scene.num_primitives = len(mlp_idx)
-            scene.mlps = torch.nn.ModuleList([scene.mlps[i] for i in mlp_idx])
-            scene.positions = torch.nn.Parameter(scene.positions[mlp_idx])
-            scene.log_scales = torch.nn.Parameter(scene.log_scales[mlp_idx])
-
-        # Debug scales
-        scales = torch.exp(scene.log_scales)
-        print('scene scales ', scales)
-        print('Number of scales > 1:', (scales > 1).sum().item())
-        print('Number of scales < 0.001:', (scales < 0.001).sum().item())
-
-        # ---------------- Predict in batches ----------------
-        batch_size = 100000
-        pred_rgb_chunks = []
-        for i in range(0, rays_o.shape[0], batch_size):
-            chunk_pred = scene(rays_o[i:i+batch_size], rays_d[i:i+batch_size]).cpu()  # move to CPU immediately
-            pred_rgb_chunks.append(chunk_pred)
-            del chunk_pred
-            torch.cuda.empty_cache()
-
-        pred_rgb = torch.cat(pred_rgb_chunks, dim=0)
-        del pred_rgb_chunks
-
-        print('invalid num ', scene.invalid_nums)
-
-        # ---------------- Reshape & compute PSNR ----------------
-        pred_img = pred_rgb.view(1, 800, 800, 3).clamp(0, 1)
-        gt_img = gt_rgb.cpu().view(1, 800, 800, 3)
-        psnr = -10 * torch.log10(torch.mean((pred_img - gt_img) ** 2)).item()
-
-        # ---------------- Visualization ----------------
-        if fig is None:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-            ax0_img = axes[0].imshow(gt_img[0].numpy())
-            axes[0].set_title("Ground Truth")
-            ax1_img = axes[1].imshow(pred_img[0].numpy())
-            axes[1].set_title(f"Prediction (PSNR: {psnr:.2f} dB)")
-            plt.tight_layout()
-            plt.ion()
-            plt.show()
-        else:
-            ax0_img.set_data(gt_img[0].numpy())
-            ax1_img.set_data(pred_img[0].numpy())
-            ax1_img.axes.set_title(f"Prediction (PSNR: {psnr:.2f} dB)")
-            fig.canvas.draw()
-            fig.canvas.flush_events()
-
-        total += psnr
-        plt.pause(0.001)
-
-        # ---------------- Free memory ----------------
-        del scene, rays_o, rays_d, gt_rgb, pred_rgb, pred_img, gt_img, scales
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    print("Average PSNR:", total / 300)
