@@ -307,8 +307,13 @@ def _sample_tile_mosaic_batch(
     view_ids: torch.Tensor,
     tile_size: int,
     view_cache: OrderedDict,
+    include_feature: bool = False,
 ):
-    """Compose one full-frame mosaic from random tile views."""
+    """Compose one full-frame mosaic from random tile views.
+
+    When include_feature=True, returns an additional HWC feature GT mosaic that
+    reuses the same tile->view assignment as RGB/rays.
+    """
     view_ids = view_ids.to(dtype=torch.long, device="cpu")
     if view_ids.numel() == 0:
         raise ValueError("view_ids must not be empty")
@@ -326,13 +331,38 @@ def _sample_tile_mosaic_batch(
     tile_view_local = torch.randint(0, K, (num_tiles,), dtype=torch.long)
     tile_img_ids = view_ids.index_select(0, tile_view_local)
 
+    def _parse_view_sample(sample):
+        if not isinstance(sample, (tuple, list)):
+            raise TypeError(f"Unexpected dataset sample type: {type(sample)}")
+        if len(sample) == 4:
+            rays_o_hw, rays_d_hw, img_hw3, _pose = sample
+            feat_hwc = None
+        elif len(sample) == 5:
+            rays_o_hw, rays_d_hw, img_hw3, feat_hwc, _pose = sample
+        else:
+            raise ValueError(f"Unexpected dataset sample tuple length: {len(sample)}")
+        return rays_o_hw, rays_d_hw, img_hw3, feat_hwc
+
+    def _load_feature_for_view(idx: int):
+        if getattr(dataset, "features", None) is not None:
+            feat = dataset.features[int(idx)]
+            return feat.contiguous().cpu()
+        if getattr(dataset, "_feature_paths", None) is not None:
+            feat = dataset._get_feature_lazy(int(idx))
+            return feat.contiguous().cpu()
+        return None
+
     def _get_view(idx: int):
         key = int(idx)
         cached = view_cache.get(key)
+        feat_hwc = None
         if cached is not None:
             view_cache.move_to_end(key)
-            return cached
-        rays_o_hw, rays_d_hw, img_hw3, _pose = dataset[key]
+            rays_o_hw, rays_d_hw, img_hw3 = cached
+            if include_feature:
+                feat_hwc = _load_feature_for_view(key)
+            return rays_o_hw, rays_d_hw, img_hw3, feat_hwc
+        rays_o_hw, rays_d_hw, img_hw3, feat_hwc = _parse_view_sample(dataset[key])
         cached = (
             rays_o_hw.contiguous().cpu(),
             rays_d_hw.contiguous().cpu(),
@@ -342,17 +372,38 @@ def _sample_tile_mosaic_batch(
         # Keep cache bounded; avoid unbounded CPU memory growth.
         if len(view_cache) > 32:
             view_cache.popitem(last=False)
-        return cached
+        if include_feature:
+            if feat_hwc is None:
+                feat_hwc = _load_feature_for_view(key)
+            elif torch.is_tensor(feat_hwc):
+                feat_hwc = feat_hwc.contiguous().cpu()
+        return cached[0], cached[1], cached[2], feat_hwc
 
     rays_o_views = []
     rays_d_views = []
     rgb_views = []
+    feat_views = [] if include_feature else None
+    feat_shape = None
     for i in range(K):
         rid = int(view_ids[i].item())
-        ro, rd, rgb = _get_view(rid)
+        ro, rd, rgb, feat = _get_view(rid)
         rays_o_views.append(ro)
         rays_d_views.append(rd)
         rgb_views.append(rgb)
+        if include_feature:
+            if feat is None:
+                raise RuntimeError(
+                    "include_feature=True but feature tensor is unavailable for "
+                    f"view index {rid}."
+                )
+            if feat_shape is None:
+                feat_shape = tuple(feat.shape)
+            elif tuple(feat.shape) != feat_shape:
+                raise ValueError(
+                    "All mosaic candidate views must share the same feature shape; "
+                    f"got {tuple(feat.shape)} vs {feat_shape}."
+                )
+            feat_views.append(feat)
 
     def _to_tiles(x_hw3: torch.Tensor):
         if x_hw3.shape[0] != Hpad or x_hw3.shape[1] != Wpad:
@@ -381,7 +432,28 @@ def _sample_tile_mosaic_batch(
     rays_d_hw = _from_tiles(sel_rd)
     rgbs_hw = _from_tiles(sel_rgb)
 
-    return rays_o_hw, rays_d_hw, rgbs_hw, tile_view_local, tile_img_ids
+    feat_hwc = None
+    if include_feature:
+        tile_view_grid = tile_view_local.view(Ty, Tx)
+        tile_view_hw = tile_view_grid.repeat_interleave(tile_size, dim=0).repeat_interleave(tile_size, dim=1)
+        tile_view_hw = tile_view_hw[:Himg, :Wimg].contiguous()
+
+        feat_stack = torch.stack(feat_views, dim=0)  # (K, Hf, Wf, Cf)
+        Hf, Wf = int(feat_stack.shape[1]), int(feat_stack.shape[2])
+        if Hf == Himg and Wf == Wimg:
+            tile_view_feat = tile_view_hw
+        else:
+            tile_view_feat = F.interpolate(
+                tile_view_hw.to(dtype=torch.float32).unsqueeze(0).unsqueeze(0),
+                size=(Hf, Wf),
+                mode="nearest",
+            ).squeeze(0).squeeze(0).to(dtype=torch.long)
+
+        yy = torch.arange(Hf, dtype=torch.long).unsqueeze(1).expand(Hf, Wf)
+        xx = torch.arange(Wf, dtype=torch.long).unsqueeze(0).expand(Hf, Wf)
+        feat_hwc = feat_stack[tile_view_feat, yy, xx].contiguous()
+
+    return rays_o_hw, rays_d_hw, rgbs_hw, feat_hwc, tile_view_local, tile_img_ids
 
 
 
@@ -525,8 +597,8 @@ def train_scene_llff(
     use_tile_mosaic = bool(engine == "tile_cuda" and tile_mosaic)
     if use_tile_mosaic and tile_order != "tilecenter":
         raise ValueError("tile_mosaic currently supports tile_order='tilecenter' only.")
-    if use_feature_metric and use_tile_mosaic:
-        raise ValueError("featuremetric training currently supports per-image sampling only (disable --tile_mosaic).")
+    if use_tile_mosaic and use_feature_metric:
+        print("[Feature] tile_mosaic is enabled; semantic GT will be mosaicked per tile-view assignment.")
 
     """
     test on how to oganize parameters is suitable
@@ -781,11 +853,12 @@ def train_scene_llff(
                 # Build full-frame rays/GT by stitching tiles from up to k random views.
                 perm = torch.randperm(len(dataset))
                 view_ids = perm[:effective_k].to(torch.long)
-                rays_o_hw, rays_d_hw, img_hw3, tile_view_local, _tile_img_ids = _sample_tile_mosaic_batch(
+                rays_o_hw, rays_d_hw, img_hw3, feat_hwc_mosaic, tile_view_local, _tile_img_ids = _sample_tile_mosaic_batch(
                     dataset=dataset,
                     view_ids=view_ids,
                     tile_size=tile_size,
                     view_cache=tile_view_cache,
+                    include_feature=bool(use_feature_metric and (not use_mock_feature)),
                 )
                 Himg, Wimg = img_hw3.shape[0], img_hw3.shape[1]
                 scene.set_image_size(Wimg, Himg)
@@ -793,6 +866,12 @@ def train_scene_llff(
                 rays_o_batch = rays_o_hw.reshape(-1, 3).to(device, non_blocking=True)
                 rays_d_batch = rays_d_hw.reshape(-1, 3).to(device, non_blocking=True)
                 rgbs_batch = img_hw3.reshape(-1, 3).to(device, non_blocking=True)
+                if feat_hwc_mosaic is not None:
+                    feat_gt_hwc = feat_hwc_mosaic.to(device, non_blocking=True)
+                elif use_feature_metric and use_mock_feature:
+                    feat_gt_hwc = torch.matmul(rgbs_batch, mock_feature_proj).view(Himg, Wimg, feature_dim_gt)
+                else:
+                    feat_gt_hwc = None
 
                 poses_sel = dataset.poses.index_select(0, view_ids)
                 view_mats = torch.stack(
