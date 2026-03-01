@@ -8,26 +8,208 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 // Block radix sort (CUB)
 #include <cub/block/block_radix_sort.cuh>
 
-// Fast math helpers
+#ifndef MLPSP_MAX_TILE_PRIMS
+#define MLPSP_MAX_TILE_PRIMS 512
+#endif
+
+#ifndef MLPSP_MAX_H
+#define MLPSP_MAX_H 32
+#endif
+
+// EN: Fast sigmoid approximation/helper used in MLP output activation.
+// KO: MLP 출력 활성화에 사용하는 빠른 sigmoid 보조 함수입니다.
 __device__ __forceinline__ float fast_sigmoid(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
+// EN: Numerically stable softplus helper for density activation.
+// KO: 밀도 활성화를 위한 수치적으로 안정적인 softplus 보조 함수입니다.
 __device__ __forceinline__ float fast_softplus(float x) {
   if (x > 20.f) return x;
   if (x < -20.f) return __expf(x);
   return log1pf(__expf(x));
 }
 
+// EN: Computes 3D dot product with FMA for better precision/perf.
+// KO: 정밀도/성능을 위해 FMA를 사용한 3차원 내적 계산 함수입니다.
 __device__ __forceinline__ float dot3(float ax, float ay, float az, float bx, float by, float bz) {
   return fmaf(ax, bx, fmaf(ay, by, az * bz));
 }
 
-// Warp-aggregated atomic add for float gradients.
-// Threads in a warp targeting the same address are reduced first, then one atomicAdd is issued.
+// EN: Copies float buffer with vectorized path when aligned.
+// KO: 정렬이 맞으면 float4 벡터 경로로 float 버퍼를 복사합니다.
+__device__ __noinline__ void copy_float_strided_vec4(
+    float* __restrict__ dst,
+    const float* __restrict__ src,
+    int n,
+    int tid,
+    int stride) {
+  const uintptr_t dst_addr = reinterpret_cast<uintptr_t>(dst);
+  const uintptr_t src_addr = reinterpret_cast<uintptr_t>(src);
+  const bool aligned16 = ((dst_addr & 0xF) == 0) && ((src_addr & 0xF) == 0);
+  if (aligned16) {
+    int i = tid * 4;
+    const int step = stride * 4;
+    for (; i + 3 < n; i += step) {
+      *reinterpret_cast<float4*>(dst + i) = *reinterpret_cast<const float4*>(src + i);
+    }
+    for (; i < n; i += stride) dst[i] = src[i];
+  } else {
+    for (int i = tid; i < n; i += stride) dst[i] = src[i];
+  }
+}
+
+// EN: Best-effort L2 prefetch for next primitive weights.
+// KO: 다음 primitive 가중치에 대한 best-effort L2 프리페치입니다.
+__device__ __noinline__ void prefetch_weights_l2(
+    const float* __restrict__ W1,
+    const float* __restrict__ b1,
+    const float* __restrict__ W2,
+    const float* __restrict__ b2,
+    const float* __restrict__ W3,
+    const float* __restrict__ b3,
+    int p,
+    int H,
+    int IN) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+  auto l2_prefetch = [](const float* ptr) {
+    asm volatile("prefetch.global.L2 [%0];" :: "l"(ptr));
+  };
+  if (p < 0) return;
+  const float* W1p = W1 + static_cast<size_t>(p) * H * IN;
+  const float* b1p = b1 + static_cast<size_t>(p) * H;
+  const float* W2p = W2 + static_cast<size_t>(p) * H * H;
+  const float* b2p = b2 + static_cast<size_t>(p) * H;
+  const float* W3p = W3 + static_cast<size_t>(p) * H * H;
+  const float* b3p = b3 + static_cast<size_t>(p) * H;
+
+  // TODO: 왜 아래 prefetch logic이 이렇게 짜여 있는지 모르겠음.
+  // Prefetch a bounded window per tensor to avoid excess prefetch traffic.
+  for (int i = 0; i < 256; i += 32) l2_prefetch(W1p + i);
+  for (int i = 0; i < 64; i += 32) l2_prefetch(W2p + i);
+  l2_prefetch(b1p);
+  l2_prefetch(b2p);
+  l2_prefetch(W3p);
+  l2_prefetch(b3p);
+#endif
+}
+
+template <typename T>
+// EN: Converts scalar CUDA type to float (generic path).
+// KO: CUDA 스칼라 타입을 float으로 변환합니다(일반 경로).
+__device__ __forceinline__ float scalar_to_float(T v) {
+  return static_cast<float>(v);
+}
+
+template <>
+// EN: Converts half precision scalar to float.
+// KO: half 정밀도 스칼라를 float으로 변환합니다.
+__device__ __forceinline__ float scalar_to_float<__half>(__half v) {
+  return __half2float(v);
+}
+
+template <>
+// EN: Converts bfloat16 scalar to float.
+// KO: bfloat16 스칼라를 float으로 변환합니다.
+__device__ __forceinline__ float scalar_to_float<__nv_bfloat16>(__nv_bfloat16 v) {
+  return __bfloat162float(v);
+}
+
+template <typename T>
+// EN: Loads one scalar from memory and returns it as float.
+// KO: 메모리에서 스칼라 하나를 읽어 float으로 반환합니다.
+__device__ __forceinline__ float load_as_float(const T* p) {
+  return scalar_to_float<T>(*p);
+}
+
+template <typename WType>
+// EN: Computes row-vector dot product between weights and input vector.
+// KO: 가중치 행 벡터와 입력 벡터의 내적을 계산합니다.
+__device__ __forceinline__ float row_dot_vec(const WType* w, const float* x, int n) {
+  float acc = 0.f;
+  for (int i = 0; i < n; ++i) acc = fmaf(load_as_float(w + i), x[i], acc);
+  return acc;
+}
+
+template <>
+// EN: Optimized row dot product for half weights using half2.
+// KO: half2를 이용한 half 가중치 전용 최적화 내적 계산입니다.
+__device__ __forceinline__ float row_dot_vec<__half>(const __half* w, const float* x, int n) {
+  float acc = 0.f;
+  int i = 0;
+  for (; i + 1 < n; i += 2) {
+    const __half2 hv = *reinterpret_cast<const __half2*>(w + i);
+    const float2 wf = __half22float2(hv);
+    acc = fmaf(wf.x, x[i], acc);
+    acc = fmaf(wf.y, x[i + 1], acc);
+  }
+  if (i < n) acc = fmaf(__half2float(w[i]), x[i], acc);
+  return acc;
+}
+
+template <>
+// EN: Optimized row dot product for bfloat16 weights using vectorized loads.
+// KO: 벡터화 로드를 사용하는 bfloat16 가중치 전용 최적화 내적 계산입니다.
+__device__ __forceinline__ float row_dot_vec<__nv_bfloat16>(const __nv_bfloat16* w, const float* x, int n) {
+  float acc = 0.f;
+  int i = 0;
+  for (; i + 1 < n; i += 2) {
+    const __nv_bfloat162 bv = *reinterpret_cast<const __nv_bfloat162*>(w + i);
+    const float2 wf = __bfloat1622float2(bv);
+    acc = fmaf(wf.x, x[i], acc);
+    acc = fmaf(wf.y, x[i + 1], acc);
+  }
+  if (i < n) acc = fmaf(__bfloat162float(w[i]), x[i], acc);
+  return acc;
+}
+
+template <typename WType>
+// EN: Strided copy from typed weights to float buffer.
+// KO: 타입 가중치 배열을 stride 방식으로 float 버퍼에 복사합니다.
+__device__ __forceinline__ void cast_copy_strided(float* dst, const WType* src, int n, int tid, int stride) {
+  for (int i = tid; i < n; i += stride) dst[i] = load_as_float(src + i);
+}
+
+template <>
+// EN: Strided cast-copy specialized for half using half2 conversion.
+// KO: half2 변환을 활용한 half 전용 stride 캐스팅 복사입니다.
+__device__ __forceinline__ void cast_copy_strided<__half>(float* dst, const __half* src, int n, int tid, int stride) {
+  int i = tid * 2;
+  const int step = stride * 2;
+  for (; i + 1 < n; i += step) {
+    const __half2 hv = *reinterpret_cast<const __half2*>(src + i);
+    const float2 vf = __half22float2(hv);
+    dst[i] = vf.x;
+    dst[i + 1] = vf.y;
+  }
+  if (i < n) dst[i] = __half2float(src[i]);
+}
+
+template <>
+// EN: Strided cast-copy specialized for bfloat16 using packed conversion.
+// KO: packed 변환을 활용한 bfloat16 전용 stride 캐스팅 복사입니다.
+__device__ __forceinline__ void cast_copy_strided<__nv_bfloat16>(float* dst, const __nv_bfloat16* src, int n, int tid, int stride) {
+  int i = tid * 2;
+  const int step = stride * 2;
+  for (; i + 1 < n; i += step) {
+    const __nv_bfloat162 bv = *reinterpret_cast<const __nv_bfloat162*>(src + i);
+    const float2 vf = __bfloat1622float2(bv);
+    dst[i] = vf.x;
+    dst[i + 1] = vf.y;
+  }
+  if (i < n) dst[i] = __bfloat162float(src[i]);
+}
+
+// EN: Warp-aggregated atomic add to reduce atomic contention on float grads.
+// KO: float gradient 원자 연산 경쟁을 줄이기 위한 warp 집계 atomic add입니다.
+// EN: Threads targeting the same address are reduced first, then one atomicAdd is issued.
+// KO: 같은 주소를 갱신하는 스레드들을 먼저 합산한 뒤 atomicAdd를 1회 수행합니다.
+// Volta 미만의 아키텍처에서는 단순 atomicAdd를 사용합니다.
 __device__ __forceinline__ void atomic_add_warp_agg(float* addr, float value) {
 #if __CUDA_ARCH__ >= 700
   const unsigned active = __activemask();
@@ -48,21 +230,24 @@ __device__ __forceinline__ void atomic_add_warp_agg(float* addr, float value) {
 #endif
 }
 
-// MLP eval: given 6D input v6, outputs rgb + sigma_raw
+// EN: Evaluates the MLP for one 6D feature and returns RGB + raw sigma.
+// KO: 단일 6D feature에 대해 MLP를 평가하여 RGB와 sigma raw를 반환합니다.
+template <typename WType>
 __device__ __forceinline__ void mlp_eval_rgb_sigma(
     const float* __restrict__ freq_bands,
     const float* __restrict__ attenuation,
     const int F,
-    const float* __restrict__ W1p, const float* __restrict__ b1p,
-    const float* __restrict__ W2p, const float* __restrict__ b2p,
-    const float* __restrict__ W3p, const float* __restrict__ b3p,
+    const WType* __restrict__ W1p, const WType* __restrict__ b1p,
+    const WType* __restrict__ W2p, const WType* __restrict__ b2p,
+    const WType* __restrict__ W3p, const WType* __restrict__ b3p,
     const int H, const int IN,
     const float v6[6],
     float &out_r, float &out_g, float &out_b, float &out_sigma_raw)
 {
-  float h1[64];
-  const int Hcap = H > 32 ? 32 : H;
-  for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = b1p[h_idx];
+  // 이 함수 원래 3 layer 일 때를 가정하고 짜여 있었음. 이제 4 layer로 수정함.
+  float h1[MLPSP_MAX_H];
+  const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
+  for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = load_as_float(b1p + h_idx);
 
   const int cos_offset = IN / 2;
   for (int c = 0; c < 6; ++c) {
@@ -74,29 +259,30 @@ __device__ __forceinline__ void mlp_eval_rgb_sigma(
       const float s = __sinf(xproj);
       const float co = __cosf(xproj);
       for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-        const float* Wi = W1p + (size_t)h_idx * IN;
-        h1[h_idx] = fmaf(Wi[j], s, h1[h_idx]);
-        h1[h_idx] = fmaf(Wi[j + cos_offset], co, h1[h_idx]);
+        const WType* Wi = W1p + (size_t)h_idx * IN;
+        h1[h_idx] = fmaf(load_as_float(Wi + j), s, h1[h_idx]);
+        h1[h_idx] = fmaf(load_as_float(Wi + j + cos_offset), co, h1[h_idx]);
       }
     }
   }
   for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
 
-  float h2[64];
+  float h2[MLPSP_MAX_H];
   for (int o = 0; o < Hcap; ++o) {
-    float acc = b2p[o];
-    const float* W2row = W2p + (size_t)o * H;
-    for (int h_idx = 0; h_idx < Hcap; ++h_idx) acc = fmaf(W2row[h_idx], h1[h_idx], acc);
+    float acc = load_as_float(b2p + o);
+    const WType* W2row = W2p + (size_t)o * H;
+    acc += row_dot_vec<WType>(W2row, h1, Hcap);
     h2[o] = acc > 0.f ? acc : 0.f;
   }
 
-  float o3=b3p[0], o4=b3p[1], o5=b3p[2], o6=b3p[3];
+  float o3 = load_as_float(b3p + 0), o4 = load_as_float(b3p + 1);
+  float o5 = load_as_float(b3p + 2), o6 = load_as_float(b3p + 3);
   for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
     const float hi = h2[h_idx];
-    o3 = fmaf(W3p[0*H + h_idx], hi, o3);
-    o4 = fmaf(W3p[1*H + h_idx], hi, o4);
-    o5 = fmaf(W3p[2*H + h_idx], hi, o5);
-    o6 = fmaf(W3p[3*H + h_idx], hi, o6);
+    o3 = fmaf(load_as_float(W3p + 0 * H + h_idx), hi, o3);
+    o4 = fmaf(load_as_float(W3p + 1 * H + h_idx), hi, o4);
+    o5 = fmaf(load_as_float(W3p + 2 * H + h_idx), hi, o5);
+    o6 = fmaf(load_as_float(W3p + 3 * H + h_idx), hi, o6);
   }
 
   out_r = fast_sigmoid(o3);
@@ -104,7 +290,8 @@ __device__ __forceinline__ void mlp_eval_rgb_sigma(
   out_b = fast_sigmoid(o5);
   out_sigma_raw = fast_softplus(o6);
 }
-// Compute closest approach info and Gaussian culling
+// EN: Computes ray-to-primitive closest approach and Gaussian culling terms.
+// KO: 레이-프리미티브 최근접 접근 및 가우시안 컬링 관련 값을 계산합니다.
 __device__ __forceinline__ bool hit_and_features(
     float rox, float roy, float roz,
     float rdx, float rdy, float rdz,
@@ -135,7 +322,8 @@ __device__ __forceinline__ bool hit_and_features(
   return true;
 }
 
-// Kernel: render tiles with per-pixel sorting
+// EN: Forward rendering kernel with per-pixel depth sorting inside each tile.
+// KO: 타일 내부에서 픽셀별 깊이 정렬을 수행하는 포워드 렌더링 커널입니다.
 __global__ void render_tiles_kernel_with_sort(
     // Rays and primitives
     const float* __restrict__ rays_o,
@@ -266,8 +454,8 @@ __global__ void render_tiles_kernel_with_sort(
     const float* W3p = W3 + (size_t)p * 4 * H;
     const float* b3p = b3 + (size_t)p * 4;
 
-    float h1[64];
-    int Hcap = H > 64 ? 64 : H;
+    float h1[MLPSP_MAX_H];
+    int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = b1p[h_idx];
 
     const int cos_offset = IN / 2;
@@ -288,7 +476,7 @@ __global__ void render_tiles_kernel_with_sort(
     }
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
 
-    float h2[64];
+    float h2[MLPSP_MAX_H];
     for (int o = 0; o < Hcap; ++o) {
       float acc = b2p[o];
       const float* W2row = W2p + (size_t)o * H;
@@ -327,9 +515,9 @@ __global__ void render_tiles_kernel_with_sort(
   out_alpha[pix]   = 1.f - trans;
 }
 
-
-
 // Backward (per-pixel): count pass
+// EN: Backward prepass kernel that counts valid contributions per pixel (per-pixel order).
+// KO: 픽셀별 순서 기준으로 유효 기여 개수를 세는 backward 사전 카운트 커널입니다.
 __global__ void render_tiles_backward_count_per_pixel(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -455,6 +643,8 @@ __global__ void render_tiles_backward_count_per_pixel(
 }
 
 // Backward (per-pixel): emit pass
+// EN: Backward emit kernel that materializes per-hit records and geometry grads (per-pixel order).
+// KO: 픽셀별 순서 기준으로 히트 레코드와 기하 gradient를 생성하는 backward emit 커널입니다.
 __global__ void render_tiles_backward_emit_per_pixel(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -670,6 +860,9 @@ __global__ void render_tiles_backward_emit_per_pixel(
 // Kernel: tile-level approximate ordering (tile-center ray) + prim-major traversal.
 // NOTE: Blending order becomes tile-shared (approximate). Per-pixel t is still used inside hit_and_features
 // for distance/feature computation (not for ordering).
+template <typename WType>
+// EN: Forward rendering kernel using tile-center primitive ordering with shared-weight staging.
+// KO: shared weight staging과 타일 중심 순서를 사용하는 포워드 렌더링 커널입니다.
 __global__ void render_tiles_kernel_tilecenter_order(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -680,9 +873,9 @@ __global__ void render_tiles_kernel_tilecenter_order(
     const float* __restrict__ freq_bands,
     const float* __restrict__ attenuation,
     const int F,
-    const float* __restrict__ W1, const float* __restrict__ b1,
-    const float* __restrict__ W2, const float* __restrict__ b2,
-    const float* __restrict__ W3, const float* __restrict__ b3,
+    const WType* __restrict__ W1, const WType* __restrict__ b1,
+    const WType* __restrict__ W2, const WType* __restrict__ b2,
+    const WType* __restrict__ W3, const WType* __restrict__ b3,
     const int N, const int H, const int IN,
     const int Wimg, const int Himg, const int TW, const int TH,
     const float thr,
@@ -741,7 +934,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
 
   // Block-level radix sort assumes a fixed block size (16x16 => 256 threads).
   // `cumodel.py` currently uses tile_size=16, so this holds for normal use.
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
@@ -789,7 +982,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
 
   // dynamic shared memory for weights
   extern __shared__ float sW[];
-  const int Hcap = H > 64 ? 64 : H;
+  const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
   const int W1n = Hcap * IN;
   const int b1n = Hcap;
   const int W2n = Hcap * Hcap;
@@ -802,30 +995,21 @@ __global__ void render_tiles_kernel_tilecenter_order(
   float* sb2 = sW2 + W2n;
   float* sW3 = sb2 + b2n;
   float* sb3 = sW3 + W3n;
-  const int total_floats = W1n + b1n + W2n + b2n + W3n + b3n;
 
   auto load_weights = [&](int p) {
-    const float* W1p = W1 + (size_t)p * H * IN;
-    const float* b1p = b1 + (size_t)p * H;
-    const float* W2p = W2 + (size_t)p * H * H;
-    const float* b2p = b2 + (size_t)p * H;
-    const float* W3p = W3 + (size_t)p * 4 * H;
-    const float* b3p = b3 + (size_t)p * 4;
+    const WType* W1p = W1 + (size_t)p * H * IN;
+    const WType* b1p = b1 + (size_t)p * H;
+    const WType* W2p = W2 + (size_t)p * H * H;
+    const WType* b2p = b2 + (size_t)p * H;
+    const WType* W3p = W3 + (size_t)p * 4 * H;
+    const WType* b3p = b3 + (size_t)p * 4;
 
-    for (int idx = tid; idx < total_floats; idx += num_threads) {
-      int off = idx;
-      if (off < W1n) { sW1[off] = W1p[off]; continue; }
-      off -= W1n;
-      if (off < b1n) { sb1[off] = b1p[off]; continue; }
-      off -= b1n;
-      if (off < W2n) { sW2[off] = W2p[off]; continue; }
-      off -= W2n;
-      if (off < b2n) { sb2[off] = b2p[off]; continue; }
-      off -= b2n;
-      if (off < W3n) { sW3[off] = W3p[off]; continue; }
-      off -= W3n;
-      if (off < b3n) { sb3[off] = b3p[off]; }
-    }
+    cast_copy_strided<WType>(sW1, W1p, W1n, tid, num_threads);
+    cast_copy_strided<WType>(sb1, b1p, b1n, tid, num_threads);
+    cast_copy_strided<WType>(sW2, W2p, W2n, tid, num_threads);
+    cast_copy_strided<WType>(sb2, b2p, b2n, tid, num_threads);
+    cast_copy_strided<WType>(sW3, W3p, W3n, tid, num_threads);
+    cast_copy_strided<WType>(sb3, b3p, b3n, tid, num_threads);
     __syncthreads();
   };
 
@@ -838,8 +1022,8 @@ __global__ void render_tiles_kernel_tilecenter_order(
       const float lg = logs[p];
       if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
         float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
-
-        float h1[64];
+        // ---- layer1: IN -> H (PE 입력) ----
+        float h1[MLPSP_MAX_H];
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = sb1[h_idx];
 
         const int cos_offset = IN / 2;
@@ -849,18 +1033,21 @@ __global__ void render_tiles_kernel_tilecenter_order(
             const float att = attenuation[f];
             const float xproj = v6[c] * fb * att;
             const int j = c * F + f;
-            const float s = __sinf(xproj);
+            const float s  = __sinf(xproj);
             const float co = __cosf(xproj);
+
+            // accumulate into h1
             for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
               const float* Wi = sW1 + (size_t)h_idx * IN;
-              h1[h_idx] = fmaf(Wi[j], s, h1[h_idx]);
+              h1[h_idx] = fmaf(Wi[j],            s,  h1[h_idx]);
               h1[h_idx] = fmaf(Wi[j + cos_offset], co, h1[h_idx]);
             }
           }
         }
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
 
-        float h2[64];
+        // ---- layer2: H -> H ----
+        float h2[MLPSP_MAX_H];
         for (int o = 0; o < Hcap; ++o) {
           float acc = sb2[o];
           const float* W2row = sW2 + (size_t)o * Hcap;
@@ -868,6 +1055,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
           h2[o] = acc > 0.f ? acc : 0.f;
         }
 
+        // ---- layer3: H -> OUT(4) ----
         float o3 = sb3[0], o4 = sb3[1], o5 = sb3[2], o6 = sb3[3];
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
           const float hi = h2[h_idx];
@@ -877,13 +1065,14 @@ __global__ void render_tiles_kernel_tilecenter_order(
           o6 = fmaf(sW3[3*Hcap + h_idx], hi, o6);
         }
 
+        // ---- activations & compositing ----
         const float sigma_raw = fast_softplus(o6);
         const float sigma = sigma_raw * decay;
         const float alpha = 1.f - __expf(-sigma);
         const float w = trans * alpha;
 
-        const float R = fast_sigmoid(o3);
-        const float G = fast_sigmoid(o4);
+        const float R  = fast_sigmoid(o3);
+        const float G  = fast_sigmoid(o4);
         const float Bc = fast_sigmoid(o5);
         C.x = fmaf(w, R, C.x);
         C.y = fmaf(w, G, C.y);
@@ -925,6 +1114,8 @@ __global__ void render_tiles_kernel_tilecenter_order(
 }
 
 // Backward (tilecenter): count pass
+// EN: Backward prepass kernel that counts valid contributions in tile-center traversal order.
+// KO: 타일 중심 순회 순서에서 유효 기여 개수를 세는 backward 사전 카운트 커널입니다.
 __global__ void render_tiles_backward_count_tilecenter(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -982,7 +1173,7 @@ __global__ void render_tiles_backward_count_tilecenter(
     return;
   }
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -1068,6 +1259,8 @@ __global__ void render_tiles_backward_count_tilecenter(
 }
 
 // Backward (tilecenter): emit pass
+// EN: Backward emit kernel for tile-center traversal that outputs hit-level gradients.
+// KO: 타일 중심 순회 기준으로 히트 단위 gradient를 출력하는 backward emit 커널입니다.
 __global__ void render_tiles_backward_emit_tilecenter(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -1136,7 +1329,7 @@ __global__ void render_tiles_backward_emit_tilecenter(
 
   if (tile_len <= 0) return;
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -1309,6 +1502,10 @@ __global__ void render_tiles_backward_emit_tilecenter(
 }
 
 // Backward (tilecenter full): compute MLP grads in-kernel (option A)
+template <typename WType>
+// EN: Full tile-center backward kernel computing MLP and geometry gradients in one pass.
+// KO: 타일 중심 기준으로 MLP/기하 gradient를 한 번에 계산하는 전체 backward 커널입니다.
+// The only effective backward kernel for tilecenter mode.
 __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -1319,9 +1516,9 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float* __restrict__ freq_bands,
     const float* __restrict__ attenuation,
     const int F,
-    const float* __restrict__ W1, const float* __restrict__ b1,
-    const float* __restrict__ W2, const float* __restrict__ b2,
-    const float* __restrict__ W3, const float* __restrict__ b3,
+    const WType* __restrict__ W1, const WType* __restrict__ b1,
+    const WType* __restrict__ W2, const WType* __restrict__ b2,
+    const WType* __restrict__ W3, const WType* __restrict__ b3,
     const int N, const int H, const int IN,
     const int Wimg, const int Himg, const int TW, const int TH,
     const float thr,
@@ -1374,7 +1571,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
 
   if (tile_len <= 0) return;
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -1430,12 +1627,12 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float lg = logs[p];
     if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
       const float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
-      const float* W1p = W1 + (size_t)p * H * IN;
-      const float* b1p = b1 + (size_t)p * H;
-      const float* W2p = W2 + (size_t)p * H * H;
-      const float* b2p = b2 + (size_t)p * H;
-      const float* W3p = W3 + (size_t)p * 4 * H;
-      const float* b3p = b3 + (size_t)p * 4;
+      const WType* W1p = W1 + (size_t)p * H * IN;
+      const WType* b1p = b1 + (size_t)p * H;
+      const WType* W2p = W2 + (size_t)p * H * H;
+      const WType* b2p = b2 + (size_t)p * H;
+      const WType* W3p = W3 + (size_t)p * 4 * H;
+      const WType* b3p = b3 + (size_t)p * 4;
       float R, G, Bc, sigma_raw;
       mlp_eval_rgb_sigma(freq_bands, attenuation, F, W1p, b1p, W2p, b2p, W3p, b3p, H, IN, v6, R, G, Bc, sigma_raw);
       const float sigma = sigma_raw * decay;
@@ -1470,7 +1667,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
 
   // reverse pass
   float gT_next = gT_end;
-  const int Hcap = H > 64 ? 64 : H;
+  const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
   const int cos_offset = IN / 2;
   for (int i = used - 1; i >= 0; --i) {
     const float trans_i = trans_arr[i];
@@ -1480,56 +1677,68 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float dz = dz_arr[i];
 
     const float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
-    const float* W1p = W1 + (size_t)p * H * IN;
-    const float* b1p = b1 + (size_t)p * H;
-    const float* W2p = W2 + (size_t)p * H * H;
-    const float* b2p = b2 + (size_t)p * H;
-    const float* W3p = W3 + (size_t)p * 4 * H;
-    const float* b3p = b3 + (size_t)p * 4;
+    const WType* W1p = W1 + (size_t)p * H * IN;
+    const WType* b1p = b1 + (size_t)p * H;
+    const WType* W2p = W2 + (size_t)p * H * H;
+    const WType* b2p = b2 + (size_t)p * H;
+    const WType* W3p = W3 + (size_t)p * 4 * H;
+    const WType* b3p = b3 + (size_t)p * 4;
 
     // MLP forward (recompute) + backprop
-    float h1_pre[32];
-    for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1_pre[h_idx] = b1p[h_idx];
+    // ---------- Forward recompute ----------
+    float h1_pre[MLPSP_MAX_H];
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1_pre[h_idx] = load_as_float(b1p + h_idx);
 
+    // PE accumulate into h1_pre using W1
     for (int c = 0; c < 6; ++c) {
       for (int f = 0; f < F; ++f) {
-        const float fb = freq_bands[f];
+        const float fb  = freq_bands[f];
         const float att = attenuation[f];
         const float xproj = v6[c] * fb * att;
         const int j = c * F + f;
-        const float s = __sinf(xproj);
+        const float s  = __sinf(xproj);
         const float co = __cosf(xproj);
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-          const float* Wi = W1p + (size_t)h_idx * IN;
-          h1_pre[h_idx] = fmaf(Wi[j], s, h1_pre[h_idx]);
-          h1_pre[h_idx] = fmaf(Wi[j + cos_offset], co, h1_pre[h_idx]);
+          const WType* Wi = W1p + (size_t)h_idx * IN;
+          h1_pre[h_idx] = fmaf(load_as_float(Wi + j),            s,  h1_pre[h_idx]);
+          h1_pre[h_idx] = fmaf(load_as_float(Wi + j + cos_offset), co, h1_pre[h_idx]);
         }
       }
     }
-    float h2_pre[32];
+
+    float h1_relu[MLPSP_MAX_H];
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1_relu[h_idx] = (h1_pre[h_idx] > 0.f) ? h1_pre[h_idx] : 0.f;
+
+    // layer2 pre + relu
+    float h2_pre[MLPSP_MAX_H];
+    float h2_relu[MLPSP_MAX_H];
     for (int o = 0; o < Hcap; ++o) {
-      float acc = b2p[o];
-      const float* W2row = W2p + (size_t)o * H;
-      for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-        const float h1_relu = h1_pre[h_idx] > 0.f ? h1_pre[h_idx] : 0.f;
-        acc = fmaf(W2row[h_idx], h1_relu, acc);
-      }
-      h2_pre[o] = acc;
+      float acc = load_as_float(b2p + o);
+      const WType* W2row = W2p + (size_t)o * H;
+      acc += row_dot_vec<WType>(W2row, h1_relu, Hcap);
+      h2_pre[o]  = acc;
+      h2_relu[o] = (acc > 0.f) ? acc : 0.f;
     }
 
-    float o3=b3p[0], o4=b3p[1], o5=b3p[2], o6=b3p[3];
+    // out3 = b3 + W3 * h2_relu
+    float o3 = load_as_float(b3p + 0);
+    float o4 = load_as_float(b3p + 1);
+    float o5 = load_as_float(b3p + 2);
+    float o6 = load_as_float(b3p + 3);
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-      const float hi = h2_pre[h_idx] > 0.f ? h2_pre[h_idx] : 0.f;
-      o3 = fmaf(W3p[0*H + h_idx], hi, o3);
-      o4 = fmaf(W3p[1*H + h_idx], hi, o4);
-      o5 = fmaf(W3p[2*H + h_idx], hi, o5);
-      o6 = fmaf(W3p[3*H + h_idx], hi, o6);
+      const float hi = h2_relu[h_idx];
+      o3 = fmaf(load_as_float(W3p + 0 * H + h_idx), hi, o3);
+      o4 = fmaf(load_as_float(W3p + 1 * H + h_idx), hi, o4);
+      o5 = fmaf(load_as_float(W3p + 2 * H + h_idx), hi, o5);
+      o6 = fmaf(load_as_float(W3p + 3 * H + h_idx), hi, o6);
     }
 
     const float R = fast_sigmoid(o3);
     const float G = fast_sigmoid(o4);
     const float Bc = fast_sigmoid(o5);
     const float sigma_raw = fast_softplus(o6);
+
+    // ---------- Compositing scalar grads (same logic) ----------
     const float s = __expf(logs[p]);
     const float s2 = s * s;
     const float perp2 = fmaxf(dx*dx + dy*dy + dz*dz, 0.f);
@@ -1544,10 +1753,12 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float sigma = sigma_raw * decay;
     const float exp_neg_sigma = __expf(-sigma);
     const float grad_sigma = grad_alpha * exp_neg_sigma;
-    const float sigmoid_o6 = 1.f - __expf(-sigma_raw);
-    const float grad_sigma_raw = grad_sigma * decay * sigmoid_o6;
 
-    // geometry grads
+    // sigma_raw = softplus(o6) => d sigma_raw / d o6 = sigmoid(o6) = 1 - exp(-sigma_raw)
+    const float sigmoid_o6 = 1.f - __expf(-sigma_raw);
+    const float grad_sigma_raw = grad_sigma * decay;// * sigmoid_o6;
+
+    // geometry grads (unchanged)
     const float grad_decay = grad_sigma * sigma_raw;
     const float scale = -grad_decay * decay / (s2 + 1e-12f);
     atomic_add_warp_agg(&grad_positions[p*3+0], scale * dx);
@@ -1556,15 +1767,17 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float grad_log_s = grad_decay * decay * perp2 / (s2 + 1e-12f);
     atomic_add_warp_agg(&grad_log_scales[p], grad_log_s);
 
+    // RGB path grads
     const float grad_rgb_r = grad_r * (trans_i * alpha_i);
     const float grad_rgb_g = grad_g * (trans_i * alpha_i);
     const float grad_rgb_b = grad_b * (trans_i * alpha_i);
 
-    const float grad_o3 = grad_rgb_r * R * (1.f - R);
-    const float grad_o4 = grad_rgb_g * G * (1.f - G);
+    const float grad_o3 = grad_rgb_r * R  * (1.f - R);
+    const float grad_o4 = grad_rgb_g * G  * (1.f - G);
     const float grad_o5 = grad_rgb_b * Bc * (1.f - Bc);
     const float grad_o6 = grad_sigma_raw * sigmoid_o6;
 
+    // ---------- Write grads ----------
     float* gW1p = grad_W1 + (size_t)p * H * IN;
     float* gb1p = grad_b1 + (size_t)p * H;
     float* gW2p = grad_W2 + (size_t)p * H * H;
@@ -1574,7 +1787,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
 
     // W3/b3 grads
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-      const float hi = h2_pre[h_idx] > 0.f ? h2_pre[h_idx] : 0.f;
+      const float hi = h2_relu[h_idx];
       atomic_add_warp_agg(&gW3p[0*H + h_idx], grad_o3 * hi);
       atomic_add_warp_agg(&gW3p[1*H + h_idx], grad_o4 * hi);
       atomic_add_warp_agg(&gW3p[2*H + h_idx], grad_o5 * hi);
@@ -1585,41 +1798,50 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     atomic_add_warp_agg(&gb3p[2], grad_o5);
     atomic_add_warp_agg(&gb3p[3], grad_o6);
 
-    // W2/b2 grads and dh1
-    float dh1[32];
-    for (int h_idx = 0; h_idx < Hcap; ++h_idx) dh1[h_idx] = 0.f;
+    // dh2 = W3^T * grad_out, then ReLU'(h2_pre)
+    float dh2[MLPSP_MAX_H];
     for (int o = 0; o < Hcap; ++o) {
-      float go = W3p[0*H + o] * grad_o3
-               + W3p[1*H + o] * grad_o4
-               + W3p[2*H + o] * grad_o5
-               + W3p[3*H + o] * grad_o6;
+      float go = load_as_float(W3p + 0*H + o) * grad_o3
+              + load_as_float(W3p + 1*H + o) * grad_o4
+              + load_as_float(W3p + 2*H + o) * grad_o5
+              + load_as_float(W3p + 3*H + o) * grad_o6;
       if (h2_pre[o] <= 0.f) go = 0.f;
-      atomic_add_warp_agg(&gb2p[o], go);
-      const float* W2row = W2p + (size_t)o * H;
+      dh2[o] = go;
+      atomic_add_warp_agg(&gb2p[o], go); // b2 (layer2 bias) grad
+    }
+
+    // (2) Layer2: W2 grads and accumulate dh1
+    float dh1[MLPSP_MAX_H];
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) dh1[h_idx] = 0.f;
+
+    for (int o = 0; o < Hcap; ++o) {
+      const float go = dh2[o];
+      const WType* W2row = W2p + (size_t)o * H;
       float* gW2row = gW2p + (size_t)o * H;
       for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-        const float h1_relu = h1_pre[h_idx] > 0.f ? h1_pre[h_idx] : 0.f;
-        atomic_add_warp_agg(&gW2row[h_idx], go * h1_relu);
-        dh1[h_idx] = fmaf(W2row[h_idx], go, dh1[h_idx]);
+        atomic_add_warp_agg(&gW2row[h_idx], go * h1_relu[h_idx]);
+        dh1[h_idx] = fmaf(load_as_float(W2row + h_idx), go, dh1[h_idx]);
       }
     }
+
+    // apply ReLU'(h1_pre) and b1 grads
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
       if (h1_pre[h_idx] <= 0.f) dh1[h_idx] = 0.f;
       atomic_add_warp_agg(&gb1p[h_idx], dh1[h_idx]);
     }
 
-    // W1 grads
+    // (4) W1 grads (PE sin/cos)
     for (int c = 0; c < 6; ++c) {
       for (int f = 0; f < F; ++f) {
-        const float fb = freq_bands[f];
+        const float fb  = freq_bands[f];
         const float att = attenuation[f];
         const float xproj = v6[c] * fb * att;
         const int j = c * F + f;
-        const float s = __sinf(xproj);
+        const float s  = __sinf(xproj);
         const float co = __cosf(xproj);
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
           float* gWi = gW1p + (size_t)h_idx * IN;
-          atomic_add_warp_agg(&gWi[j], dh1[h_idx] * s);
+          atomic_add_warp_agg(&gWi[j],             dh1[h_idx] * s);
           atomic_add_warp_agg(&gWi[j + cos_offset], dh1[h_idx] * co);
         }
       }
@@ -1765,6 +1987,8 @@ __global__ void render_tiles_backward_featattr_tilecenter(
 }
 
 // Backward (tilecenter backprop-only, no atomics): profile compute cost without atomic accumulation.
+// EN: Tile-center backprop-only profiling kernel without atomic gradient accumulation.
+// KO: 원자적 gradient 누적 없이 동작하는 타일 중심 backprop 전용 프로파일링 커널입니다.
 __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backprop_noatomic(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -1825,7 +2049,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
   const int tile_len = (int)(prim_end - prim_start);
   if (tile_len <= 0) return;
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -1919,7 +2143,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
 
   // reverse pass (compute only)
   float gT_next = gT_end;
-  const int Hcap = H > 32 ? 32 : H;
+  const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
   const int cos_offset = IN / 2;
   float sink = 0.f;
   for (int i = used - 1; i >= 0; --i) {
@@ -1937,7 +2161,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
     const float* W3p = W3 + (size_t)p * 4 * H;
     const float* b3p = b3 + (size_t)p * 4;
 
-    float h1_pre[32];
+    float h1_pre[MLPSP_MAX_H];
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1_pre[h_idx] = b1p[h_idx];
     for (int c = 0; c < 6; ++c) {
       for (int f = 0; f < F; ++f) {
@@ -1954,7 +2178,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
         }
       }
     }
-    float h2_pre[32];
+    float h2_pre[MLPSP_MAX_H];
     for (int o = 0; o < Hcap; ++o) {
       float acc = b2p[o];
       const float* W2row = W2p + (size_t)o * H;
@@ -1993,7 +2217,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
     const float exp_neg_sigma = __expf(-sigma);
     const float grad_sigma = grad_alpha * exp_neg_sigma;
     const float sigmoid_o6 = 1.f - __expf(-sigma_raw);
-    const float grad_sigma_raw = grad_sigma * decay * sigmoid_o6;
+    const float grad_sigma_raw = grad_sigma * decay;// * sigmoid_o6;
 
     // geometry grads (no atomics)
     const float grad_decay = grad_sigma * sigma_raw;
@@ -2024,7 +2248,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
     sink += grad_o3 + grad_o4 + grad_o5 + grad_o6;
 
     // W2/b2 grads and dh1
-    float dh1[32];
+    float dh1[MLPSP_MAX_H];
     for (int h_idx = 0; h_idx < Hcap; ++h_idx) dh1[h_idx] = 0.f;
     for (int o = 0; o < Hcap; ++o) {
       float go = W3p[0*H + o] * grad_o3
@@ -2066,6 +2290,8 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
 }
 
 // Backward (tilecenter traversal-only): profile traversal + MLP forward cost without backprop.
+// EN: Tile-center traversal-only profiling kernel that reports usage/transmittance.
+// KO: 사용량/투과도를 기록하는 타일 중심 순회 전용 프로파일링 커널입니다.
 __global__ void render_tiles_backward_tilecenter_traversal(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -2126,7 +2352,7 @@ __global__ void render_tiles_backward_tilecenter_traversal(
     return;
   }
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -2212,7 +2438,10 @@ __global__ void render_tiles_backward_tilecenter_traversal(
 
 // Kernel: prim-major traversal, but assumes per-tile primitive lists are ALREADY ORDERED (no in-kernel sort).
 // Intended for "globaldepth" mode where the host sorts each tile's list by primitive center camera-space forward (view-space z).
-__global__ void render_tiles_kernel_tilecenter_presorted(
+// EN: Forward rendering kernel that consumes a pre-sorted per-tile primitive list.
+// KO: 사전 정렬된 타일별 primitive 리스트를 사용하는 포워드 렌더링 커널입니다.
+// The only effective forward kernel for tilecenter_split mode.
+__global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presorted(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
     const float* __restrict__ pos,
@@ -2270,7 +2499,7 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
     return;
   }
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
 
   const int num_threads = TW * TH;
@@ -2288,7 +2517,7 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
 
   // dynamic shared memory for weights
   extern __shared__ float sW[];
-  const int Hcap = H > 64 ? 64 : H;
+  const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
   const int W1n = Hcap * IN;
   const int b1n = Hcap;
   const int W2n = Hcap * Hcap;
@@ -2301,8 +2530,6 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
   float* sb2 = sW2 + W2n;
   float* sW3 = sb2 + b2n;
   float* sb3 = sW3 + W3n;
-  const int total_floats = W1n + b1n + W2n + b2n + W3n + b3n;
-
   auto load_weights = [&](int p) {
     const float* W1p = W1 + (size_t)p * H * IN;
     const float* b1p = b1 + (size_t)p * H;
@@ -2310,21 +2537,12 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
     const float* b2p = b2 + (size_t)p * H;
     const float* W3p = W3 + (size_t)p * 4 * H;
     const float* b3p = b3 + (size_t)p * 4;
-
-    for (int idx = tid; idx < total_floats; idx += num_threads) {
-      int off = idx;
-      if (off < W1n) { sW1[off] = W1p[off]; continue; }
-      off -= W1n;
-      if (off < b1n) { sb1[off] = b1p[off]; continue; }
-      off -= b1n;
-      if (off < W2n) { sW2[off] = W2p[off]; continue; }
-      off -= W2n;
-      if (off < b2n) { sb2[off] = b2p[off]; continue; }
-      off -= b2n;
-      if (off < W3n) { sW3[off] = W3p[off]; continue; }
-      off -= W3n;
-      if (off < b3n) { sb3[off] = b3p[off]; }
-    }
+    copy_float_strided_vec4(sW1, W1p, W1n, tid, num_threads);
+    copy_float_strided_vec4(sb1, b1p, b1n, tid, num_threads);
+    copy_float_strided_vec4(sW2, W2p, W2n, tid, num_threads);
+    copy_float_strided_vec4(sb2, b2p, b2n, tid, num_threads);
+    copy_float_strided_vec4(sW3, W3p, W3n, tid, num_threads);
+    copy_float_strided_vec4(sb3, b3p, b3n, tid, num_threads);
     __syncthreads();
   };
 
@@ -2338,17 +2556,19 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
       if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
         float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
 
-        float h1[64];
+        // ---- layer1: IN -> H (PE 입력) ----
+        float h1[MLPSP_MAX_H];
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = sb1[h_idx];
 
         const int cos_offset = IN / 2;
         for (int c = 0; c < 6; ++c) {
           for (int f = 0; f < F; ++f) {
             const float fb = freq_bands[f];
-            const float a = attenuation[f];
-            const float v = v6[c] * fb;
-            const float sv = __sinf(v) * a;
-            const float cv = __cosf(v) * a;
+            const float a  = attenuation[f];
+            // identical encoding math to tilecenter_order
+            const float v  = v6[c] * fb * a;
+            const float sv = __sinf(v);
+            const float cv = __cosf(v);
 
             const int si = c * F + f;
             const int ci = cos_offset + c * F + f;
@@ -2361,32 +2581,33 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
             }
           }
         }
-
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
 
-        float h2[64];
-        for (int h_idx = 0; h_idx < Hcap; ++h_idx) h2[h_idx] = sb2[h_idx];
+        // ---- layer2: H -> H ----
+        float h2[MLPSP_MAX_H];
+        #pragma unroll 1
         for (int o = 0; o < Hcap; ++o) {
-          const float xo = h1[o];
-          const float* wrow = sW2 + (size_t)o * Hcap;
-          for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
-            h2[h_idx] = fmaf(wrow[h_idx], xo, h2[h_idx]);
-          }
+          float acc = sb2[o];
+          const float* W2row = sW2 + (size_t)o * Hcap;
+          for (int h_idx = 0; h_idx < Hcap; ++h_idx) acc = fmaf(W2row[h_idx], h1[h_idx], acc);
+          h2[o] = acc > 0.f ? acc : 0.f;
         }
-        for (int h_idx = 0; h_idx < Hcap; ++h_idx) h2[h_idx] = h2[h_idx] > 0.f ? h2[h_idx] : 0.f;
 
+        // ---- layer3: H -> OUT(4) ----
         float out4[4] = {sb3[0], sb3[1], sb3[2], sb3[3]};
+
+        #pragma unroll 1
         for (int o = 0; o < Hcap; ++o) {
           const float xo = h2[o];
-          const float* wrow = sW3 + (size_t)o;
-          out4[0] = fmaf(wrow[0 * Hcap], xo, out4[0]);
-          out4[1] = fmaf(wrow[1 * Hcap], xo, out4[1]);
-          out4[2] = fmaf(wrow[2 * Hcap], xo, out4[2]);
-          out4[3] = fmaf(wrow[3 * Hcap], xo, out4[3]);
+          const float* wcol = sW3 + (size_t)o;   // column o 접근용 (아래서 k*Hcap stride)
+          out4[0] = fmaf(wcol[0 * Hcap], xo, out4[0]);
+          out4[1] = fmaf(wcol[1 * Hcap], xo, out4[1]);
+          out4[2] = fmaf(wcol[2 * Hcap], xo, out4[2]);
+          out4[3] = fmaf(wcol[3 * Hcap], xo, out4[3]);
         }
 
-        const float R = fast_sigmoid(out4[0]);
-        const float G = fast_sigmoid(out4[1]);
+        const float R  = fast_sigmoid(out4[0]);
+        const float G  = fast_sigmoid(out4[1]);
         const float Bc = fast_sigmoid(out4[2]);
         const float sigma = fast_softplus(out4[3]) * decay;
 
@@ -2404,11 +2625,33 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
   for (int i = 0; i < load_n; ++i) {
     const int p = s_pid[i];
     if (p < 0) break;
+    if (i + 1 < load_n) {
+      const int pn = s_pid[i + 1];
+      prefetch_weights_l2(W1, b1, W2, b2, W3, b3, pn, H, IN);
+    }
     load_weights(p);
     eval_and_blend(p);
-    const int all_done = __syncthreads_or((!valid_pix) || (trans < 1e-3f));
-    if (all_done) break;
+    const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+    if (__syncthreads_or(active) == 0) break;
     __syncthreads();
+  }
+
+  // Process tail entries beyond MAX_TILE_PRIMS using global-memory list order.
+  // This mirrors tilecenter_order behavior and avoids silently dropping primitives.
+  if (tile_len > load_n) {
+    for (int i = prim_start + load_n; i < prim_end; ++i) {
+      const int p = (int)culled_prim_indices[i];
+      if (p < 0 || p >= N) continue;
+      if (i + 1 < prim_end) {
+        const int pn = (int)culled_prim_indices[i + 1];
+        if (pn >= 0 && pn < N) prefetch_weights_l2(W1, b1, W2, b2, W3, b3, pn, H, IN);
+      }
+      load_weights(p);
+      eval_and_blend(p);
+      const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+      if (__syncthreads_or(active) == 0) break;
+      __syncthreads();
+    }
   }
 
   if (valid_pix) {
@@ -2422,6 +2665,8 @@ __global__ void render_tiles_kernel_tilecenter_presorted(
 
 class RenderTilesCUDASinglePass : public torch::autograd::Function<RenderTilesCUDASinglePass> {
 public:
+    // EN: Autograd forward entry for single-pass per-pixel sorted renderer.
+    // KO: 단일 패스 픽셀별 정렬 렌더러의 autograd forward 진입점입니다.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -2489,6 +2734,8 @@ public:
         return {rgb, alpha};
     }
 
+    // EN: Placeholder autograd backward returning null grads for this path.
+    // KO: 현재 경로에서 null gradient를 반환하는 placeholder autograd backward입니다.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -2521,6 +2768,8 @@ public:
 
 class RenderTilesCUDATileCenterOrder : public torch::autograd::Function<RenderTilesCUDATileCenterOrder> {
 public:
+    // EN: Autograd forward entry for tile-center ordered renderer.
+    // KO: 타일 중심 순서 렌더러의 autograd forward 진입점입니다.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -2538,8 +2787,8 @@ public:
         int64_t TW, int64_t TH,
         double threshold)
     {
-        // This kernel uses a CUB BlockRadixSort specialization that assumes 16x16 threads (256 threads).
-        TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+        // This kernel uses a CUB BlockRadixSort specialization that assumes 256 threads per block.
+        TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
 
         TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
         TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
@@ -2567,7 +2816,7 @@ public:
         dim3 block((unsigned)(TW * TH), 1, 1);
         dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
-        const int Hcap = (int)(Hh > 64 ? 64 : Hh);
+        const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
         const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
         const size_t shared_bytes = (size_t)shared_floats * sizeof(float);
 
@@ -2593,6 +2842,8 @@ public:
         return {rgb, alpha};
     }
 
+    // EN: Placeholder autograd backward for tile-center ordered forward.
+    // KO: 타일 중심 순서 forward용 placeholder autograd backward입니다.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -2623,6 +2874,9 @@ public:
 
 class RenderTilesCUDATileCenterPresorted : public torch::autograd::Function<RenderTilesCUDATileCenterPresorted> {
 public:
+    // EN: Autograd forward entry for tile-center renderer with pre-sorted lists.
+    // KO: 사전 정렬 리스트를 사용하는 타일 중심 렌더러의 autograd forward 진입점입니다.
+    // 그냥 랩퍼 함수일 뿐으로 보인다. The only effective kernel for tilecenter_split mode.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -2640,7 +2894,7 @@ public:
         int64_t TW, int64_t TH,
         double threshold)
     {
-        TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center presorted kernel currently requires TW==16 and TH==16");
+        TORCH_CHECK(((int)TW * (int)TH) <= 256, "Tile size too large");
 
         TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
         TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
@@ -2667,7 +2921,7 @@ public:
         dim3 block((unsigned)(TW * TH), 1, 1);
         dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
-        const int Hcap = (int)(Hh > 64 ? 64 : Hh);
+        const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
         const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
         const size_t shared_bytes = (size_t)shared_floats * sizeof(float);
 
@@ -2693,6 +2947,9 @@ public:
         return {rgb, alpha};
     }
 
+    // EN: Placeholder autograd backward for presorted tile-center forward.
+    // KO: presorted 타일 중심 forward용 placeholder autograd backward입니다.
+    // Backward 따로 구현 안 돼 있는거 같은데, 우리 backward는 그렇다면 어디에? -- cumodel.py에서 따로 부르는 함수를 찾을 수 있다.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -2721,7 +2978,8 @@ public:
     }
 };
 
-// Wrapper function to be exposed to Python
+// EN: Python-exposed wrapper calling single-pass autograd apply.
+// KO: single-pass autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -2745,6 +3003,8 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_wrapper(
     return {result[0], result[1]};
 }
 
+// EN: Python-exposed wrapper calling tile-center-order autograd apply.
+// KO: tile-center-order autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -2768,6 +3028,8 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_wrappe
     return {result[0], result[1]};
 }
 
+// EN: Python-exposed wrapper calling presorted tile-center autograd apply.
+// KO: presorted tile-center autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_presorted_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -2791,7 +3053,8 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_presor
     return {result[0], result[1]};
 }
 
-// Forward-only wrappers (no autograd)
+// EN: Forward-only Python wrapper for per-pixel sorted renderer (no autograd).
+// KO: 픽셀별 정렬 렌더러의 forward 전용 Python 래퍼입니다(autograd 없음).
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -2825,7 +3088,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     const int64_t IN = W1.size(2);
     const int64_t F = freq_bands.size(0);
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
-    TORCH_CHECK(Hh <= 32, "render_tiles_backward_tilecenter_full currently supports hidden_dim <= 32");
+    TORCH_CHECK(Hh <= MLPSP_MAX_H, "render_tiles_backward_tilecenter_full currently supports hidden_dim <= MLPSP_MAX_H");
 
     auto opts_f = rays_o.options().dtype(at::kFloat);
     auto rgb = torch::zeros({B, 3}, opts_f);
@@ -2854,6 +3117,8 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     return {rgb, alpha};
 }
 
+// EN: Forward-only Python wrapper for tile-center ordered renderer (dtype-dispatched).
+// KO: 타일 중심 순서 렌더러의 forward 전용 Python 래퍼입니다(dtype 분기 지원).
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -2870,7 +3135,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -2879,6 +3144,17 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
     TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
     TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(W1.is_cuda() && b1.is_cuda() && W2.is_cuda() && b2.is_cuda() && W3.is_cuda() && b3.is_cuda(),
+                "MLP tensors must be CUDA tensors");
+    TORCH_CHECK(W1.scalar_type() == b1.scalar_type() &&
+                W1.scalar_type() == W2.scalar_type() &&
+                W1.scalar_type() == b2.scalar_type() &&
+                W1.scalar_type() == W3.scalar_type() &&
+                W1.scalar_type() == b3.scalar_type(),
+                "W/b tensors must share the same dtype");
+    TORCH_CHECK(
+        W1.scalar_type() == at::kFloat || W1.scalar_type() == at::kHalf || W1.scalar_type() == at::kBFloat16,
+        "W/b tensors must be float32, float16, or bfloat16");
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
@@ -2895,11 +3171,12 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
 
     dim3 block((unsigned)(TW * TH), 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
-    const int Hcap = (int)(Hh > 64 ? 64 : Hh);
+    const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
     const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
     const size_t shared_bytes = (size_t)shared_floats * sizeof(float);
 
-    render_tiles_kernel_tilecenter_order<<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+    if (W1.scalar_type() == at::kFloat) {
+        render_tiles_kernel_tilecenter_order<float><<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
         rays_d.data_ptr<float>(),
         positions.data_ptr<float>(),
@@ -2916,6 +3193,43 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
         (int)Wimg, (int)Himg, (int)TW, (int)TH,
         (float)threshold,
         rgb.data_ptr<float>(), alpha.data_ptr<float>());
+    } else if (W1.scalar_type() == at::kHalf) {
+        render_tiles_kernel_tilecenter_order<__half><<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+          rays_o.data_ptr<float>(),
+          rays_d.data_ptr<float>(),
+          positions.data_ptr<float>(),
+          log_scales.data_ptr<float>(),
+          culled_prim_indices.data_ptr<int32_t>(),
+          tile_offsets.data_ptr<int32_t>(),
+          freq_bands.data_ptr<float>(),
+          attenuation.data_ptr<float>(),
+          (int)F,
+          reinterpret_cast<const __half*>(W1.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b1.data_ptr<at::Half>()),
+          reinterpret_cast<const __half*>(W2.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b2.data_ptr<at::Half>()),
+          reinterpret_cast<const __half*>(W3.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b3.data_ptr<at::Half>()),
+          (int)N, (int)Hh, (int)IN,
+          (int)Wimg, (int)Himg, (int)TW, (int)TH,
+          (float)threshold,
+          rgb.data_ptr<float>(), alpha.data_ptr<float>());
+    } else {
+        render_tiles_kernel_tilecenter_order<__nv_bfloat16><<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+          rays_o.data_ptr<float>(),
+          rays_d.data_ptr<float>(),
+          positions.data_ptr<float>(),
+          log_scales.data_ptr<float>(),
+          culled_prim_indices.data_ptr<int32_t>(),
+          tile_offsets.data_ptr<int32_t>(),
+          freq_bands.data_ptr<float>(),
+          attenuation.data_ptr<float>(),
+          (int)F,
+          reinterpret_cast<const __nv_bfloat16*>(W1.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b1.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(W2.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b2.data_ptr<at::BFloat16>()),
+          reinterpret_cast<const __nv_bfloat16*>(W3.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b3.data_ptr<at::BFloat16>()),
+          (int)N, (int)Hh, (int)IN,
+          (int)Wimg, (int)Himg, (int)TW, (int)TH,
+          (float)threshold,
+          rgb.data_ptr<float>(), alpha.data_ptr<float>());
+    }
     AT_CUDA_CHECK(cudaGetLastError());
     return {rgb, alpha};
 }
@@ -3587,9 +3901,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     return {rgb, alpha, feat};
 }
 
-
-
-// Backward count wrappers
+// EN: Python wrapper for backward count prepass in per-pixel traversal.
+// KO: 픽셀별 순회 방식 backward 카운트 사전 패스용 Python 래퍼입니다.
 torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -3648,6 +3961,8 @@ torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
     return counts;
 }
 
+// EN: Python wrapper for backward count prepass in tile-center traversal.
+// KO: 타일 중심 순회 방식 backward 카운트 사전 패스용 Python 래퍼입니다.
 torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -3664,7 +3979,7 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -3707,7 +4022,8 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     return counts;
 }
 
-// Backward emit wrappers
+// EN: Python wrapper for backward emit pass in per-pixel traversal.
+// KO: 픽셀별 순회 방식 backward emit 패스용 Python 래퍼입니다.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_emit_per_pixel_wrapper(
     torch::Tensor rays_o,
@@ -3796,6 +4112,8 @@ render_tiles_backward_emit_per_pixel_wrapper(
     return {out_prim_id, out_x6, out_grad_rgb, out_grad_sigma_raw, grad_positions, grad_log_scales};
 }
 
+// EN: Python wrapper for backward emit pass in tile-center traversal.
+// KO: 타일 중심 순회 방식 backward emit 패스용 Python 래퍼입니다.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_emit_tilecenter_wrapper(
     torch::Tensor rays_o,
@@ -3818,7 +4136,7 @@ render_tiles_backward_emit_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -3902,7 +4220,7 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -3952,7 +4270,8 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     return grad_feat_attr;
 }
 
-// Full backward (tilecenter) wrapper: CUDA computes MLP grads directly
+// EN: Python wrapper for full tile-center backward where CUDA computes MLP grads directly.
+// KO: CUDA에서 MLP gradient를 직접 계산하는 full tile-center backward용 Python 래퍼입니다.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_tilecenter_full_wrapper(
     torch::Tensor rays_o,
@@ -3972,7 +4291,7 @@ render_tiles_backward_tilecenter_full_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -3981,6 +4300,17 @@ render_tiles_backward_tilecenter_full_wrapper(
     TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
     TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
     TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(W1.is_cuda() && b1.is_cuda() && W2.is_cuda() && b2.is_cuda() && W3.is_cuda() && b3.is_cuda(),
+                "MLP tensors must be CUDA tensors");
+    TORCH_CHECK(W1.scalar_type() == b1.scalar_type() &&
+                W1.scalar_type() == W2.scalar_type() &&
+                W1.scalar_type() == b2.scalar_type() &&
+                W1.scalar_type() == W3.scalar_type() &&
+                W1.scalar_type() == b3.scalar_type(),
+                "W/b tensors must share the same dtype");
+    TORCH_CHECK(
+        W1.scalar_type() == at::kFloat || W1.scalar_type() == at::kHalf || W1.scalar_type() == at::kBFloat16,
+        "W/b tensors must be float32, float16, or bfloat16");
     TORCH_CHECK(grad_out_rgb.is_cuda() && grad_out_rgb.dtype()==at::kFloat && grad_out_rgb.dim()==2 && grad_out_rgb.size(1)==3);
     TORCH_CHECK(grad_T_end.is_cuda() && grad_T_end.dtype()==at::kFloat && grad_T_end.dim()==1);
 
@@ -3995,18 +4325,19 @@ render_tiles_backward_tilecenter_full_wrapper(
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
 
     auto opts_f = rays_o.options().dtype(at::kFloat);
-    auto grad_W1 = torch::zeros_like(W1);
-    auto grad_b1 = torch::zeros_like(b1);
-    auto grad_W2 = torch::zeros_like(W2);
-    auto grad_b2 = torch::zeros_like(b2);
-    auto grad_W3 = torch::zeros_like(W3);
-    auto grad_b3 = torch::zeros_like(b3);
+    auto grad_W1 = torch::zeros(W1.sizes(), opts_f);
+    auto grad_b1 = torch::zeros(b1.sizes(), opts_f);
+    auto grad_W2 = torch::zeros(W2.sizes(), opts_f);
+    auto grad_b2 = torch::zeros(b2.sizes(), opts_f);
+    auto grad_W3 = torch::zeros(W3.sizes(), opts_f);
+    auto grad_b3 = torch::zeros(b3.sizes(), opts_f);
     auto grad_positions = torch::zeros({N, 3}, opts_f);
     auto grad_log_scales = torch::zeros({N}, opts_f);
 
     dim3 block((unsigned)(TW * TH), 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
-    render_tiles_backward_tilecenter_full<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+    if (W1.scalar_type() == at::kFloat) {
+      render_tiles_backward_tilecenter_full<float><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
         rays_d.data_ptr<float>(),
         positions.data_ptr<float>(),
@@ -4029,6 +4360,55 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
         grad_positions.data_ptr<float>(),
         grad_log_scales.data_ptr<float>());
+    } else if (W1.scalar_type() == at::kHalf) {
+      render_tiles_backward_tilecenter_full<__half><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        reinterpret_cast<const __half*>(W1.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b1.data_ptr<at::Half>()),
+        reinterpret_cast<const __half*>(W2.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b2.data_ptr<at::Half>()),
+        reinterpret_cast<const __half*>(W3.data_ptr<at::Half>()), reinterpret_cast<const __half*>(b3.data_ptr<at::Half>()),
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        grad_out_rgb.data_ptr<float>(),
+        grad_T_end.data_ptr<float>(),
+        grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
+        grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
+        grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
+        grad_positions.data_ptr<float>(),
+        grad_log_scales.data_ptr<float>());
+    } else {
+      render_tiles_backward_tilecenter_full<__nv_bfloat16><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        reinterpret_cast<const __nv_bfloat16*>(W1.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b1.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(W2.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b2.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16*>(W3.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(b3.data_ptr<at::BFloat16>()),
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        grad_out_rgb.data_ptr<float>(),
+        grad_T_end.data_ptr<float>(),
+        grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
+        grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
+        grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
+        grad_positions.data_ptr<float>(),
+        grad_log_scales.data_ptr<float>());
+    }
     AT_CUDA_CHECK(cudaGetLastError());
     return {grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3, grad_positions, grad_log_scales};
 }
@@ -4054,7 +4434,7 @@ render_tiles_backward_tilecenter_traversal_wrapper(
   const int64_t Hh = W2.size(1);
   const int64_t IN = W1.size(2);
   const int64_t F = freq_bands.size(0);
-  TORCH_CHECK(Hh <= 32, "render_tiles_backward_tilecenter_backprop_noatomic currently supports hidden_dim <= 32");
+  TORCH_CHECK(Hh <= MLPSP_MAX_H, "render_tiles_backward_tilecenter_backprop_noatomic currently supports hidden_dim <= MLPSP_MAX_H");
 
   const dim3 grid((unsigned)((Wimg + TW - 1) / TW), (unsigned)((Himg + TH - 1) / TH), 1);
   const dim3 block((unsigned)(TW * TH), 1, 1);
@@ -4079,6 +4459,8 @@ render_tiles_backward_tilecenter_traversal_wrapper(
   return {out_used, out_trans};
 }
 
+// EN: Python wrapper for backprop-only tile-center profiling kernel (no atomics).
+// KO: backprop 전용 타일 중심 프로파일링 커널용 Python 래퍼 함수입니다(atomic 없음).
 torch::Tensor
 render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
     torch::Tensor rays_o, torch::Tensor rays_d,
@@ -4124,6 +4506,8 @@ render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
   return out_sink;
 }
 
+// EN: Binds CUDA wrapper functions into the Python extension module.
+// KO: CUDA 래퍼 함수들을 Python 확장 모듈에 바인딩합니다.
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("render_tiles_autograd", &render_tiles_autograd_wrapper, "Tile single-pass MLP splatting (autograd ready)");
   m.def("render_tiles_autograd_tilecenter", &render_tiles_autograd_tilecenter_wrapper, "Tile MLP splatting (tile-center order, prim-major, shared weight staging)");
