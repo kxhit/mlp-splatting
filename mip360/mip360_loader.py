@@ -1,18 +1,43 @@
+from __future__ import annotations
+
 import numpy as np
 import imageio
 import os
 import torch
+from collections import OrderedDict
 from torch.utils.data import Dataset
 from torchvision import transforms
 from utils.read_write_model import read_images_binary, read_cameras_binary, read_points3D_binary, qvec2rotmat
 
 
 class mip360Dataset(Dataset):
-    def __init__(self, basedir, factor=4, llffhold=8, split='train'):
+    def __init__(
+        self,
+        basedir,
+        factor=4,
+        llffhold=8,
+        split='train',
+        feature_type: str = "none",
+        feature_dir: str | None = None,
+        preload_features: bool = False,
+        feature_cache_size: int = 16,
+        feature_resize_to_image: bool = False,
+        ray_cache_size: int = 8,
+    ):
         self.basedir = basedir
         self.transform = transforms.ToTensor()
         self.llffhold = llffhold
         self.split = split
+        self.feature_type = str(feature_type).lower()
+        self.feature_dir = feature_dir
+        self.preload_features = bool(preload_features)
+        self.feature_cache_size = int(max(0, feature_cache_size))
+        self.feature_resize_to_image = bool(feature_resize_to_image)
+        self._feature_cache = OrderedDict()
+        self._feature_paths = None
+        self.ray_cache_size = int(max(0, ray_cache_size))
+        self._ray_cache = OrderedDict()
+        self.features = None
         self._load_meta(factor)
 
     def _load_meta(self, factor):
@@ -21,29 +46,61 @@ class mip360Dataset(Dataset):
         images = read_images_binary(os.path.join(colmap_dir, "images.bin"))
         cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
-        image_ids_sorted = sorted(images.keys())
+        # === Keep the remaining part unchanged ===
+        # Load images first; this order becomes the canonical index order.
+        if factor == 1:
+            image_dir = os.path.join(self.basedir, "images")
+        else:
+            image_dir = os.path.join(self.basedir, f"images_{factor}")
+        self.image_paths = sorted([
+            os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(("JPG", "jpg", "png"))
+        ])
 
-        poses = []
-        hwf_list = []
-        for image_id in image_ids_sorted:
+        def _stem(path_or_name: str) -> str:
+            return os.path.splitext(os.path.basename(path_or_name))[0]
+
+        pose_by_stem = {}
+        hwf_by_stem = {}
+        for image_id in sorted(images.keys()):
             image = images[image_id]
             cam = cameras[image.camera_id]
+            stem = _stem(image.name)
+            if stem in pose_by_stem:
+                raise ValueError(f"Duplicated COLMAP image stem detected: '{stem}'")
 
             # pose: w2c → c2w
             R = qvec2rotmat(image.qvec)
             t = image.tvec.reshape(3,)
-            c2w = np.eye(4)
+            c2w = np.eye(4, dtype=np.float64)
             c2w[:3, :3] = R.T
             c2w[:3, 3] = -R.T @ t
-            poses.append(c2w[:3, :4])
+            pose_by_stem[stem] = c2w[:3, :4]
 
             # intrinsic: assume fx = fy
             H, W = cam.height, cam.width
             fx = cam.params[0]
-            hwf_list.append([H, W, fx])
+            hwf_by_stem[stem] = [H, W, fx]
 
-        poses = np.stack(poses, axis=0)         # (N, 3, 4)
-        hwf = np.array(hwf_list)                # (N, 3)
+        # Align pose/intrinsics to image filename order.
+        aligned_poses = []
+        aligned_hwf = []
+        missing_stems = []
+        for img_path in self.image_paths:
+            stem = _stem(img_path)
+            if stem not in pose_by_stem:
+                missing_stems.append(stem)
+                continue
+            aligned_poses.append(pose_by_stem[stem])
+            aligned_hwf.append(hwf_by_stem[stem])
+
+        if missing_stems:
+            preview = ", ".join(missing_stems[:8])
+            raise KeyError(
+                f"COLMAP pose/intrinsics missing for {len(missing_stems)} image(s): {preview}"
+            )
+
+        poses = np.stack(aligned_poses, axis=0)  # (N, 3, 4), aligned to self.image_paths
+        hwf = np.array(aligned_hwf)              # (N, 3), aligned to self.image_paths
 
         # === Normalize poses (keep original logic) ===
         positions = poses[:, :, 3]
@@ -73,19 +130,23 @@ class mip360Dataset(Dataset):
 
 
         self.positions = torch.from_numpy(all_xyz).float()  # shape: (M, 3)
-
-
-        # === Keep the remaining part unchanged ===
-        # Load images
-        if factor == 1:
-            image_dir = os.path.join(self.basedir, f"images")
-        else:
-            image_dir = os.path.join(self.basedir, f"images_{factor}")
-        self.image_paths = sorted([
-            os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(('JPG', 'jpg', 'png'))
-        ])
         self.images = [self.transform(imageio.imread(p)) for p in self.image_paths]
         self.images = torch.stack(self.images)
+
+        # Optional: load pre-extracted foundation features (Feature-3DGS-compatible assumption).
+        if self.feature_type != "none":
+            if self.feature_dir is None:
+                if self.feature_type == "lseg":
+                    feature_dir = os.path.join(self.basedir, "rgb_feature_langseg")
+                elif self.feature_type == "sam":
+                    feature_dir = os.path.join(self.basedir, "sam_embeddings")
+                else:
+                    raise ValueError(f"Unknown feature_type: {self.feature_type}")
+            else:
+                feature_dir = self.feature_dir
+            self._feature_paths = self._build_feature_path_list(feature_dir)
+            if self.preload_features:
+                self.features = self._preload_features()
 
         # Save normalization parameters for later use
         self.scale = scale
@@ -111,6 +172,10 @@ class mip360Dataset(Dataset):
         # Apply split
         self.images = self.images[select_ids]
         self.poses = self.poses[select_ids]
+        if self.features is not None:
+            self.features = self.features[select_ids]
+        elif self._feature_paths is not None:
+            self._feature_paths = [self._feature_paths[int(i)] for i in select_ids]
 
         # Expose selected indices and their corresponding image paths for UI/inspection
         try:
@@ -133,9 +198,129 @@ class mip360Dataset(Dataset):
     def __getitem__(self, idx):
         img = self.images[idx]
         pose = self.poses[idx]
-        rays_o, rays_d = self._get_rays(img.shape[1:], pose)
-        #return rays_o.reshape(-1, 3), rays_d.reshape(-1, 3), img.permute(1, 2, 0).reshape(-1, 3)
-        return rays_o, rays_d, img.permute(1, 2, 0), pose
+        rays_o, rays_d = self._get_rays_cached(idx, img.shape[1:], pose)
+        if self.features is None:
+            if self._feature_paths is None:
+                return rays_o, rays_d, img.permute(1, 2, 0), pose
+            feat = self._get_feature_lazy(idx)
+            return rays_o, rays_d, img.permute(1, 2, 0), feat, pose
+        return rays_o, rays_d, img.permute(1, 2, 0), self.features[idx], pose
+
+    def _build_feature_path_list(self, feature_dir: str):
+        if not os.path.isdir(feature_dir):
+            raise FileNotFoundError(f"Feature directory not found: {feature_dir}")
+
+        feature_paths = [
+            os.path.join(feature_dir, f)
+            for f in os.listdir(feature_dir)
+            if f.endswith((".npy", ".npz", ".pt"))
+        ]
+        if len(feature_paths) == 0:
+            raise FileNotFoundError(f"No feature files found in {feature_dir}")
+
+        def _normalize_feature_stem(stem: str) -> str:
+            # Feature-3DGS-style saved names often append suffixes like "_fmap_CxHxW".
+            suffixes = [
+                "_fmap_CxHxW",
+                "_fmap",
+                "_feature_CxHxW",
+                "_feature",
+            ]
+            for sfx in suffixes:
+                if stem.endswith(sfx):
+                    return stem[: -len(sfx)]
+            return stem
+
+        feature_by_stem = {}
+        for p in feature_paths:
+            stem = os.path.splitext(os.path.basename(p))[0]
+            norm_stem = _normalize_feature_stem(stem)
+            # Keep first occurrence for deterministic behavior.
+            if norm_stem not in feature_by_stem:
+                feature_by_stem[norm_stem] = p
+
+        for img_path in self.image_paths:
+            stem = os.path.splitext(os.path.basename(img_path))[0]
+            if stem not in feature_by_stem:
+                raise KeyError(f"Feature missing for image stem '{stem}' in {feature_dir}")
+        feature_paths_aligned = [feature_by_stem[os.path.splitext(os.path.basename(p))[0]] for p in self.image_paths]
+        print(f"Indexed {len(feature_paths_aligned)} feature files from {feature_dir}")
+        return feature_paths_aligned
+
+    def _load_feature_tensor(self, feat_path: str):
+        H_img, W_img = int(self.images.shape[2]), int(self.images.shape[3])
+        if feat_path.endswith(".npy"):
+            feat = torch.from_numpy(np.load(feat_path)).float()
+        elif feat_path.endswith(".npz"):
+            npz = np.load(feat_path)
+            if "feat" in npz:
+                feat = torch.from_numpy(npz["feat"]).float()
+            else:
+                first_key = list(npz.keys())[0]
+                feat = torch.from_numpy(npz[first_key]).float()
+        else:
+            loaded = torch.load(feat_path, map_location="cpu")
+            if isinstance(loaded, dict):
+                if "feat" in loaded:
+                    feat = loaded["feat"].float()
+                else:
+                    first_key = next(iter(loaded))
+                    feat = loaded[first_key].float()
+            else:
+                feat = loaded.float()
+
+        # Accept CHW or HWC; normalize to HWC.
+        if feat.ndim != 3:
+            raise ValueError(f"Expected 3D feature tensor, got {feat.shape} from {feat_path}")
+
+        # Prefer explicit naming convention from Feature-3DGS preprocessing outputs.
+        # e.g. *_fmap_CxHxW.pt should always be interpreted as CHW.
+        basename = os.path.basename(feat_path)
+        force_chw = ("CxHxW" in basename) or ("CHW" in basename)
+
+        if force_chw:
+            feat = feat.permute(1, 2, 0).contiguous()
+        elif feat.shape[0] <= 8 and feat.shape[-1] > 8:
+            feat = feat.permute(1, 2, 0).contiguous()
+        elif feat.shape[-1] <= 8 and feat.shape[0] > 8:
+            feat = feat.contiguous()
+        elif feat.shape[0] > 8 and feat.shape[-1] > 8:
+            # Ambiguous; assume HWC by default to match Feature-3DGS pre-extract convention.
+            feat = feat.contiguous()
+        else:
+            feat = feat.permute(1, 2, 0).contiguous()
+
+        if self.feature_resize_to_image and (feat.shape[0] != H_img or feat.shape[1] != W_img):
+            feat_chw = feat.permute(2, 0, 1).unsqueeze(0)
+            feat_chw = torch.nn.functional.interpolate(
+                feat_chw, size=(H_img, W_img), mode="bilinear", align_corners=False
+            )
+            feat = feat_chw.squeeze(0).permute(1, 2, 0).contiguous()
+        return feat
+
+    def _preload_features(self):
+        # Keep lazy-loading path unchanged (float32), but store preloaded features as float16
+        # to reduce host-memory footprint when --preload_features is enabled.
+        feats = [self._load_feature_tensor(p).to(dtype=torch.float16) for p in self._feature_paths]
+        feats = torch.stack(feats, dim=0)
+        print(f"Preloaded {len(feats)} feature maps into memory (dtype={feats.dtype})")
+        return feats
+
+    def _get_feature_lazy(self, idx: int):
+        key = int(idx)
+        cached = self._feature_cache.get(key)
+        if cached is not None:
+            self._feature_cache.move_to_end(key)
+            return cached
+        feat_path = self._feature_paths[key]
+        feat = self._load_feature_tensor(feat_path)
+        self._feature_cache[key] = feat
+        if self.feature_cache_size > 0:
+            while len(self._feature_cache) > self.feature_cache_size:
+                self._feature_cache.popitem(last=False)
+        else:
+            self._feature_cache.clear()
+        return feat
 
     def _get_rays(self, img_hw, c2w):
         H, W = img_hw
@@ -153,6 +338,21 @@ class mip360Dataset(Dataset):
         rays_o = c2w[:3, 3].expand(rays_d.shape)
 
         return rays_o, rays_d
+
+    def _get_rays_cached(self, idx: int, img_hw, c2w):
+        key = int(idx)
+        cached = self._ray_cache.get(key)
+        if cached is not None:
+            self._ray_cache.move_to_end(key)
+            return cached
+        rays = self._get_rays(img_hw, c2w)
+        self._ray_cache[key] = rays
+        if self.ray_cache_size > 0:
+            while len(self._ray_cache) > self.ray_cache_size:
+                self._ray_cache.popitem(last=False)
+        else:
+            self._ray_cache.clear()
+        return rays
 
     
     def get_all_rays(self, device=None, return_img_ids=False):
@@ -240,4 +440,3 @@ class mip360Dataset(Dataset):
 #         rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], -1)
 #         rays_o = c2w[:3, 3].expand(rays_d.shape)
 #         return rays_o, rays_d
-

@@ -240,6 +240,104 @@ def compute_multiview_prune_scores(
     return scores_01
 
 
+@torch.no_grad()
+def compute_prune_ids_from_scale_sigma(
+    scene,
+    *,
+    scale_rel_min: float = 0.04,
+    sigma_max: float = 0.25,
+    return_details: bool = False,
+):
+    """
+    Compute prune ids from per-primitive relative scale and sigma proxy.
+
+    Rules:
+      - prune if relative_scale >= scale_rel_min
+      - OR prune if sigma_proxy < sigma_max
+
+    Relative scale follows viewer convention:
+      1) scene cuboid diagonal from primitive centers:
+            diag = ||max(positions)-min(positions)||_2
+      2) primitive scale from exp(log_scales)
+      3) relative_scale = clamp(primitive_scale / diag, 0, 1)
+
+    Sigma proxy priority:
+      1) softplus(density bias): b3[:,3] or mlps.lin3.bias[:,3]
+      2) alpha_accum fallback
+    """
+    dev = scene.positions.device
+    N = int(scene.positions.shape[0])
+    if N <= 0:
+        empty = torch.empty(0, dtype=torch.long, device=dev)
+        return (empty, {}) if return_details else empty
+
+    # ---- relative scale in [0,1] ----
+    pos = scene.positions.detach().to(torch.float32)
+    pos_min = pos.min(dim=0).values
+    pos_max = pos.max(dim=0).values
+    scene_diag = torch.norm(pos_max - pos_min)
+    scene_diag = torch.clamp(scene_diag, min=1e-12)
+
+    scales = torch.exp(scene.log_scales.detach().to(torch.float32))
+    if scales.ndim == 2:
+        if scales.shape[1] == 1:
+            s_1d = scales[:, 0]
+        else:
+            s_1d = torch.max(scales, dim=1).values
+    else:
+        s_1d = scales.reshape(-1)
+    scale_rel = torch.clamp(s_1d / scene_diag, 0.0, 1.0)
+
+    # ---- sigma proxy ----
+    sigma_proxy = None
+    if hasattr(scene, "b3"):
+        b3 = getattr(scene, "b3")
+        if torch.is_tensor(b3) and b3.ndim == 2 and b3.shape[1] >= 4 and b3.shape[0] == N:
+            sigma_proxy = F.softplus(b3[:, 3].detach().to(torch.float32))
+
+    if sigma_proxy is None and hasattr(scene, "mlps") and hasattr(scene.mlps, "lin3") and hasattr(scene.mlps.lin3, "bias"):
+        bias = scene.mlps.lin3.bias
+        if torch.is_tensor(bias) and bias.ndim == 2 and bias.shape[1] >= 4 and bias.shape[0] == N:
+            sigma_proxy = F.softplus(bias[:, 3].detach().to(torch.float32))
+
+    if sigma_proxy is None and hasattr(scene, "alpha_accum") and torch.is_tensor(scene.alpha_accum):
+        aa = scene.alpha_accum.detach().to(torch.float32)
+        if aa.numel() == N:
+            sigma_proxy = aa
+
+    if sigma_proxy is None:
+        # no reliable sigma source -> disable sigma criterion
+        sigma_proxy = torch.full((N,), float("inf"), device=dev, dtype=torch.float32)
+
+    # ---- criteria ----
+    scale_mask = scale_rel >= float(scale_rel_min)
+    sigma_mask = sigma_proxy < float(sigma_max)
+    prune_mask = scale_mask | sigma_mask
+
+    prune_ids = torch.nonzero(prune_mask, as_tuple=False).squeeze(-1).to(torch.long)
+    if not return_details:
+        return prune_ids
+
+    info = {
+        "N": int(N),
+        "scene_diag": float(scene_diag.detach().cpu().item()),
+        "scale_rel_min": float(scale_rel_min),
+        "sigma_max": float(sigma_max),
+        "n_scale": int(scale_mask.sum().item()),
+        "n_sigma": int(sigma_mask.sum().item()),
+        "n_prune": int(prune_mask.sum().item()),
+        "scale_rel_stats": (
+            float(scale_rel.min().detach().cpu().item()),
+            float(scale_rel.max().detach().cpu().item()),
+        ),
+        "sigma_stats": (
+            float(sigma_proxy.min().detach().cpu().item()),
+            float(sigma_proxy.max().detach().cpu().item()),
+        ),
+    }
+    return prune_ids, info
+
+
 
 
 @torch.no_grad()
@@ -277,6 +375,12 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
     prune_ids   = torch.as_tensor(prune_ids,   device=device, dtype=torch.long)
     densify_ids = torch.unique(densify_ids)
     prune_ids   = torch.unique(prune_ids)
+
+    # For statistics: count ids selected by both densify and prune.
+    if densify_ids.numel() > 0 and prune_ids.numel() > 0:
+        overlap_count = int(torch.isin(densify_ids, prune_ids).sum().item())
+    else:
+        overlap_count = 0
 
     # sanitize ranges (old index space)
     if densify_ids.numel() > 0:
@@ -465,6 +569,7 @@ def densify_prune_tilecuda_and_rebuild_optimizer(
         "N0": N0,
         "densified": int(K),
         "pruned": int(prune_ids.numel()),
+        "overlap_prune_densify": overlap_count,
         "N_final": N2,
         "lrs": (float(lr0), float(lr1), float(lr2)),
         #"new_ids_appended_preprune": (list(range(N0, N0 + K)) if K > 0 else []),

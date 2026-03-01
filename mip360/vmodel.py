@@ -19,11 +19,16 @@ class IntegratedPositionalEncoding(nn.Module):
         self.sigma2 = sigma ** 2
         freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies) * torch.pi
         self.register_buffer("freq_bands", freq_bands)
+        self.register_buffer("runtime_frequency_weights", torch.ones(num_frequencies), persistent=False)
+
+    def set_runtime_frequency_weights(self, weights: torch.Tensor):
+        with torch.no_grad():
+            self.runtime_frequency_weights.copy_(weights.to(device=self.runtime_frequency_weights.device, dtype=self.runtime_frequency_weights.dtype))
 
     def forward(self, x):
         # x: (..., in_dim)
         x_proj = x[..., None] * self.freq_bands  # (..., in_dim, num_freq)
-        attenuation = torch.exp(-0.5 * (self.freq_bands ** 2) * self.sigma2)
+        attenuation = torch.exp(-0.5 * (self.freq_bands ** 2) * self.sigma2) * self.runtime_frequency_weights
         x_proj = x_proj * attenuation
         x_proj = x_proj.view(*x.shape[:-1], -1)
         return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
@@ -40,11 +45,18 @@ class FourierFeatureEncoding(nn.Module):
         self.num_frequencies = num_frequencies
         freq_bands = 2. ** torch.linspace(0., num_frequencies - 1, num_frequencies)
         self.register_buffer("freq_bands", freq_bands)
+        self.register_buffer("runtime_frequency_weights", torch.ones(num_frequencies), persistent=False)
+
+    def set_runtime_frequency_weights(self, weights: torch.Tensor):
+        with torch.no_grad():
+            self.runtime_frequency_weights.copy_(weights.to(device=self.runtime_frequency_weights.device, dtype=self.runtime_frequency_weights.dtype))
 
     def forward(self, x):
         x_proj = x[..., None] * self.freq_bands  # (..., in_dim, num_freq)
-        x_proj = x_proj.view(*x.shape[:-1], -1)
-        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+        w = self.runtime_frequency_weights.view(*([1] * (x_proj.ndim - 1)), self.num_frequencies)
+        sin_feat = (torch.sin(x_proj) * w).view(*x.shape[:-1], -1)
+        cos_feat = (torch.cos(x_proj) * w).view(*x.shape[:-1], -1)
+        return torch.cat([sin_feat, cos_feat], dim=-1)
 
     @property
     def out_dim(self):

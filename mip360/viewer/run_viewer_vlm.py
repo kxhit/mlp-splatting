@@ -1,0 +1,1770 @@
+import os
+import sys
+import time
+import argparse
+import math
+from contextlib import contextmanager
+import numpy as np
+import torch
+import torch.nn.functional as F
+from dearpygui import dearpygui as dpg
+try:
+	import yaml
+except Exception:
+	yaml = None
+
+# Support running as a script (python viewer/run_viewer.py) and as a module
+try:
+	from .camera import OrbitCamera
+	from .adapter import build_scene_from_ckpt
+	from .renderer import render_scene
+except Exception:  # ImportError or runtime packaging issues
+	from camera import OrbitCamera
+	from adapter import build_scene_from_ckpt
+	from renderer import render_scene
+
+try:
+	from .text_encoder import CLIPTextEncoder
+except Exception:
+	try:
+		from text_encoder import CLIPTextEncoder
+	except Exception:
+		local_dir = os.path.dirname(__file__)
+		if local_dir not in sys.path:
+			sys.path.append(local_dir)
+		from text_encoder import CLIPTextEncoder
+
+try:
+	from ..feature_decoder import FeatureUpsampleDecoder  # type: ignore
+except Exception:
+	try:
+		from feature_decoder import FeatureUpsampleDecoder  # type: ignore
+	except Exception:
+		parent = os.path.dirname(os.path.dirname(__file__))
+		if parent not in sys.path:
+			sys.path.append(parent)
+		from feature_decoder import FeatureUpsampleDecoder  # type: ignore
+
+# robust import for dataset
+try:
+	from ..mip360_loader import mip360Dataset  # type: ignore
+except Exception:
+	try:
+		from mip360_loader import mip360Dataset  # type: ignore
+	except Exception:
+		parent = os.path.dirname(os.path.dirname(__file__))
+		if parent not in sys.path:
+			sys.path.append(parent)
+		from mip360_loader import mip360Dataset  # type: ignore
+
+
+def parse_args():
+	parser = argparse.ArgumentParser()
+	parser.add_argument("--output_dir", type=str, required=True)
+	parser.add_argument("--ckpt", type=str, required=True)
+	parser.add_argument("--width", type=int, default=800)
+	parser.add_argument("--height", type=int, default=600)
+	parser.add_argument("--fov", type=float, default=60.0)
+	parser.add_argument("--device", type=str, default="cuda")
+	parser.add_argument("--batch_size", type=int, default=100000)
+	parser.add_argument("--data_dir", type=str, default="")
+	parser.add_argument("--factor", type=int, default=8)
+	parser.add_argument("--llffhold", type=int, default=8)
+	parser.add_argument("--decoder_ckpt", type=str, default="", help="Optional decoder checkpoint for semantic feature upsampling when query dim != primitive feature dim.")
+	parser.add_argument("--clip_model", type=str, default="ViT-B/32", help="CLIP model name used for text query embedding.")
+	parser.add_argument("--clip_download_root", type=str, default="/tmp/tmp_clip", help="Download/cache root for CLIP model weights.")
+	parser.add_argument(
+		"--vlm_edit_config",
+		type=str,
+		default=os.path.join(os.path.dirname(__file__), "configs", "vlm_edit_labels.yaml"),
+		help="YAML file containing candidate label set for language-guided editing.",
+	)
+	parser.add_argument("--engine", type=str, default=os.environ.get("MLPSP_ENGINE", "legacy"), choices=["legacy", "cuda", "tile_cuda"], help="Rendering engine: legacy (vmodel), cuda (two-pass selection), or tile_cuda (single-pass tile)")
+	# Profiling / benchmarking helpers (Nsight-friendly)
+	parser.add_argument("--profile_nvtx", action="store_true", help="Add NVTX ranges and use cudaProfilerStart/Stop to bracket a capture window.")
+	parser.add_argument("--profile_warmup_frames", type=int, default=60, help="Number of rendered frames to skip before starting the capture window.")
+	parser.add_argument("--profile_frames", type=int, default=300, help="Number of rendered frames to include in the capture window.")
+	parser.add_argument("--exit_after_profile", action="store_true", help="Exit viewer after the profile capture window ends.")
+	return parser.parse_args()
+
+
+@contextmanager
+def _nvtx_range(msg: str, enabled: bool):
+	"""
+	Lightweight NVTX range wrapper (safe when NVTX is unavailable).
+	We keep it optional to avoid hard dependencies and to preserve portability.
+	"""
+	if enabled and torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+		try:
+			torch.cuda.nvtx.range_push(msg)
+			yield
+		finally:
+			torch.cuda.nvtx.range_pop()
+	else:
+		yield
+
+
+class ViewerApp:
+	def __init__(self, args):
+		os.makedirs(args.output_dir, exist_ok=True)
+		self.args = args
+		self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+		# Profiling state (rendered-frames based, not GUI ticks)
+		self._rendered_frames = 0
+		self._profile_started = False
+		self._profile_done = False
+		self._profile_nvtx_window_open = False
+		self._profile_nvtx_enabled = bool(args.profile_nvtx) and (self.device.type == "cuda")
+		self._profile_warmup_frames = max(int(args.profile_warmup_frames), 0)
+		self._profile_frames = max(int(args.profile_frames), 0)
+		self._exit_after_profile = bool(args.exit_after_profile)
+		# checkpoint management (file or directory)
+		self.ckpt_dir = None
+		self.ckpt_items = []  # UI items (filenames)
+		self.ckpt_paths = []  # full paths aligned with items
+		self.selected_ckpt_path = None
+		if os.path.isdir(args.ckpt):
+			self.ckpt_dir = args.ckpt
+			self._scan_ckpt_dir()
+			# choose the most recently modified .pt file if available
+			if self.ckpt_paths:
+				self.selected_ckpt_path = self.ckpt_paths[0]
+			else:
+				raise FileNotFoundError(f"No .pt files found in directory: {args.ckpt}")
+		else:
+			self.selected_ckpt_path = args.ckpt
+		self.scene = build_scene_from_ckpt(self.selected_ckpt_path, self.device, engine=self.args.engine)
+
+		self.W = args.width
+		self.H = args.height
+		self.aspect = float(self.W) / float(self.H) if self.H != 0 else 1.0
+		# Base render resolution (MLP runs only at this size)
+		self.base_W = int(self.W)
+		self.base_H = int(self.H)
+		self.cam = OrbitCamera(self.base_W, self.base_H, fov_deg=args.fov)
+		self.last_render_time = time.time()
+		self.last_fps_time = time.time()
+		self.frame_count_for_fps = 0
+		self.fps_text = None
+		self.needs_redraw = True
+		self.dragging = False
+		self.last_mouse = (0, 0)
+		self.batch_size = args.batch_size
+		self.use_dataset_pose = False
+		self.show_point_centers = False
+		self.overlay_point_radius_px = 2
+		# background toggle
+		self.white_bg = True
+		# exclusion selection state
+		self.enable_exclude_select = False
+		self.excluded_mask = None  # torch.bool on CPU sized to num_primitives
+		self._log_scales_backup = None  # backup of original log_scales for restore
+		# threshold filters for pruning preview
+		self.enable_scale_filter = False
+		self.scale_filter_threshold = 0.05  # relative scale threshold in [0, 1]
+		self.scale_filter_mode_small = True  # True: exclude smaller-than-threshold
+		self.enable_sigma_filter = False
+		self.sigma_filter_threshold = 0.01
+		self._scene_scale_diag = 1.0
+		self._last_scale_rel_stats = (0.0, 0.0)
+		self._last_sigma_stats = (0.0, 0.0)
+		self._last_excluded_count = 0
+		self._last_total_count = 0
+		# PSNR status (default invalid)
+		self._psnr_valid = False
+		self._psnr_value = None
+		self._psnr_pending_idx = None
+		self.psnr_text = None
+		# delay PSNR computation by a frame after pose changes to avoid transient mismatch
+		self._psnr_delay_frames = 0
+		# rectangle selection state (Shift-drag / Ctrl+Shift-drag)
+		self._rect_select_active = False
+		self._rect_select_start = (0.0, 0.0)
+		self._rect_select_end = (0.0, 0.0)
+		self._rect_select_include = False  # True: include (ctrl+shift), False: exclude (shift only)
+		# track previous cumulative drag deltas per button to compute incremental deltas
+		self._left_drag_prev: tuple[float, float] | None = None
+		self._right_drag_prev: tuple[float, float] | None = None
+		self._did_left_drag = False
+		# VLM query editing state
+		self.vlm_label_config_path = os.path.abspath(str(args.vlm_edit_config).strip())
+		self.vlm_candidate_labels = self._load_vlm_candidate_labels(self.vlm_label_config_path)
+		self.vlm_target_label = self.vlm_candidate_labels[0]
+		self.vlm_query_text = self.vlm_target_label
+		self.vlm_query_embedding = None  # torch.Tensor[D] on self.device
+		self.vlm_prompt_embeddings = None  # torch.Tensor[num_labels, D] on self.device
+		self.vlm_threshold = 0.2
+		self.vlm_operation = "deletion"
+		self.vlm_encoder = None
+		self.vlm_status = ""
+		self.decoder_ckpt_path = str(args.decoder_ckpt).strip()
+		self._feature_decoder = None
+		self._feature_decoder_in_dim = None
+		self._feature_decoder_out_dim = None
+
+		# dataset poses (optional)
+		self.dataset = None
+		self.dataset_labels = []
+		self.dataset_label_to_index = {}
+		self.dataset_H = None
+		self.dataset_W = None
+		self.dataset_focal = None
+		self.dataset_cam_idx = None
+		if args.data_dir and os.path.isdir(args.data_dir):
+			try:
+				self.dataset = mip360Dataset(args.data_dir, factor=args.factor, llffhold=args.llffhold, split='train')
+				if len(self.dataset.images) > 0:
+					img0 = self.dataset.images[0]
+					self.dataset_C, self.dataset_H, self.dataset_W = img0.shape
+					self.dataset_focal = float(self.dataset.focal)
+					# labels: "index (filename)" using dataset-provided paths if available
+					try:
+						if hasattr(self.dataset, 'image_paths_selected') and isinstance(self.dataset.image_paths_selected, list) and len(self.dataset.image_paths_selected) == len(self.dataset):
+							names = [os.path.basename(p) for p in self.dataset.image_paths_selected]
+						elif hasattr(self.dataset, 'image_paths') and hasattr(self.dataset, 'select_ids') and len(self.dataset.select_ids) == len(self.dataset):
+							names = [os.path.basename(self.dataset.image_paths[i]) for i in self.dataset.select_ids]
+						else:
+							names = [""] * len(self.dataset)
+						self.dataset_labels = [f"{i} ({names[i]})" if names[i] else f"{i}" for i in range(len(self.dataset))]
+						self.dataset_label_to_index = {self.dataset_labels[i]: i for i in range(len(self.dataset))}
+					except Exception:
+						self.dataset_labels = [f"{i}" for i in range(len(self.dataset))]
+						self.dataset_label_to_index = {self.dataset_labels[i]: i for i in range(len(self.dataset))}
+			except Exception as e:
+				print("[viewer] Failed to load dataset poses:", e)
+
+		# If a dataset is provided, override initial width/height with the dataset image resolution
+		# (images are already loaded at the requested downscale factor), and recreate the camera
+		if self.dataset is not None and args.data_dir and os.path.isdir(args.data_dir):
+			try:
+				if (self.dataset_W is not None) and (self.dataset_H is not None):
+					if int(self.dataset_W) > 0 and int(self.dataset_H) > 0:
+						self.W = int(self.dataset_W)
+						self.H = int(self.dataset_H)
+						self.aspect = float(self.W) / float(self.H) if self.H != 0 else 1.0
+						self.base_W = int(self.W)
+						self.base_H = int(self.H)
+						# Recreate orbit camera to use the new base resolution
+						self.cam = OrbitCamera(self.base_W, self.base_H, fov_deg=args.fov)
+			except Exception:
+				pass
+
+		dpg.create_context()
+		dpg.create_viewport(title="MLP Splatting Viewer", width=self.W+320, height=self.H+80)
+		# texture registry and initial texture
+		# texture registry and initial texture (keep handle to reuse on resize)
+		self.tex_reg = dpg.add_texture_registry()
+		self.tex_id = dpg.add_dynamic_texture(self.W, self.H, [0.0]*(self.W*self.H*4), parent=self.tex_reg)
+
+		with dpg.window(label="Controls", width=300, height=self.H, pos=(self.W+10, 10)):
+			self.yaw_slider = dpg.add_slider_float(label="Yaw", default_value=0.0, min_value=-np.pi, max_value=np.pi, callback=self._on_yaw)
+			self.pitch_slider = dpg.add_slider_float(label="Pitch", default_value=0.0, min_value=-np.pi, max_value=np.pi, callback=self._on_pitch)
+			self.radius_slider = dpg.add_slider_float(label="Radius", default_value=self.cam.radius, min_value=0.3, max_value=5.0, callback=self._on_radius)
+			self.fov_slider = dpg.add_slider_float(label="FOV", default_value=self.cam.fov_deg, min_value=30.0, max_value=100.0, callback=self._on_fov)
+			self.size_slider = dpg.add_slider_int(label="Render Height (px)", default_value=self.H, min_value=200, max_value=1600, callback=self._on_resize_height)
+			self.bg_checkbox = dpg.add_checkbox(label="White background", default_value=True, callback=self._on_toggle_white_bg)
+			dpg.add_button(label="Screenshot", callback=self._on_screenshot)
+			self.fps_text = dpg.add_text("FPS: 0.0")
+			dpg.add_text(default_value=f"Device: {self.device}")
+			# checkpoint dropdown if a directory was provided
+			if self.ckpt_dir is not None and self.ckpt_items:
+				self.ckpt_combo = dpg.add_combo(label="Checkpoint", items=self.ckpt_items, default_value=os.path.basename(self.selected_ckpt_path), callback=self._on_select_ckpt)
+			if self.dataset_labels:
+				self.dataset_combo = dpg.add_combo(label="Training View", items=self.dataset_labels, callback=self._on_select_view)
+				self.lock_checkbox = dpg.add_checkbox(label="Lock to dataset pose", default_value=False, callback=self._on_toggle_lock_view)
+				# PSNR readout (only valid when unlocked and exactly at a dataset pose)
+				self.psnr_text = dpg.add_text(default_value="PSNR: invalid")
+			self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow/red)", default_value=False, callback=self._on_toggle_overlay)
+			# Exclusion selection controls
+			self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
+			self.btn_all_set = dpg.add_button(label="all-set", callback=self._on_all_set, enabled=False)
+			self.btn_all_reset = dpg.add_button(label="all-reset", callback=self._on_all_reset, enabled=False)
+			dpg.add_separator()
+			dpg.add_text(default_value="VLM Query Editing")
+			self.vlm_embedding_text = dpg.add_text(default_value="Current Label Embedding: None")
+			self.vlm_cfg_text = dpg.add_text(default_value=f"Label Config: {self.vlm_label_config_path}")
+			self.vlm_target_combo = dpg.add_combo(
+				label="Target Label",
+				items=self.vlm_candidate_labels,
+				default_value=self.vlm_target_label,
+				callback=self._on_vlm_target_label,
+				width=260,
+			)
+			dpg.add_button(label="Encode Label Set", callback=self._on_encode_query)
+			self.vlm_threshold_slider = dpg.add_slider_float(
+				label="Selection threshold",
+				default_value=float(self.vlm_threshold),
+				min_value=0.0,
+				max_value=1.0,
+				callback=self._on_vlm_threshold,
+			)
+			self.vlm_op_combo = dpg.add_combo(
+				label="Operation",
+				items=["deletion", "extraction"],
+				default_value=self.vlm_operation,
+				callback=self._on_vlm_operation,
+			)
+			dpg.add_button(label="Apply Query Operation", callback=self._on_apply_vlm_operation)
+			self.vlm_status_text = dpg.add_text(default_value="Query status: idle")
+			# Threshold filters (for pruning preview)
+			self.scale_filter_checkbox = dpg.add_checkbox(label="Enable scale filter", default_value=False, callback=self._on_toggle_scale_filter)
+			self.scale_mode_combo = dpg.add_combo(
+				label="Scale filter mode",
+				items=["exclude < threshold", "exclude > threshold"],
+				default_value="exclude < threshold",
+				callback=self._on_scale_mode,
+			)
+			self.scale_thresh_slider = dpg.add_slider_float(
+				label="Scale threshold (relative)",
+				default_value=float(self.scale_filter_threshold),
+				min_value=0.0,
+				max_value=1.0,
+				callback=self._on_scale_threshold,
+			)
+			self.sigma_filter_checkbox = dpg.add_checkbox(label="Enable sigma filter", default_value=False, callback=self._on_toggle_sigma_filter)
+			self.sigma_thresh_slider = dpg.add_slider_float(
+				label="Sigma threshold",
+				default_value=float(self.sigma_filter_threshold),
+				min_value=0.0,
+				max_value=5.0,
+				callback=self._on_sigma_threshold,
+			)
+			self.filter_stats_text = dpg.add_text(default_value="Filter stats: excluded=0/0, scale_rel[min,max]=[0.000, 0.000], sigma[min,max]=[0.000, 0.000], scene_diag=1.0000")
+		with dpg.window(label="Render", width=self.W, height=self.H, pos=(10, 10)) as self.render_win:
+			with dpg.drawlist(width=self.W, height=self.H) as self.drawlist:
+				self.draw_image_id = dpg.draw_image(self.tex_id, (0, 0), (self.W, self.H))
+
+		dpg.set_primary_window(self.render_win, True)
+		dpg.setup_dearpygui()
+		dpg.show_viewport()
+
+		# input handlers
+		with dpg.handler_registry():
+			dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, callback=self._on_mouse_drag)
+			dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=self._on_mouse_drag_right)
+			dpg.add_mouse_wheel_handler(callback=self._on_mouse_wheel)
+			dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Left, callback=self._on_mouse_click)
+			# key handlers for roll: '[' and ']'
+			dpg.add_key_press_handler(key=ord('['), callback=self._on_roll_ccw)
+			dpg.add_key_press_handler(key=ord(']'), callback=self._on_roll_cw)
+			# commit orientation on roll key release (no rebase to global up here to avoid snap-back)
+			dpg.add_key_release_handler(key=ord('['), callback=self._on_roll_released)
+			dpg.add_key_release_handler(key=ord(']'), callback=self._on_roll_released)
+			# A/D dolly forward/backward (uppercase and lowercase)
+			dpg.add_key_press_handler(key=ord('W'), callback=self._on_dolly_forward)
+			dpg.add_key_press_handler(key=ord('w'), callback=self._on_dolly_forward)
+			dpg.add_key_press_handler(key=ord('S'), callback=self._on_dolly_backward)
+			dpg.add_key_press_handler(key=ord('s'), callback=self._on_dolly_backward)
+			# reset drag accumulators on mouse release
+			dpg.add_mouse_release_handler(callback=self._on_mouse_release)
+
+	def _mouse_over_render(self) -> bool:
+		try:
+			return dpg.is_item_hovered(self.drawlist)
+		except Exception:
+			return False
+
+	def _on_yaw(self, s, a):
+		self.cam.yaw = float(a)
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_pitch(self, s, a):
+		self.cam.pitch = float(a)
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_radius(self, s, a):
+		self.cam.radius = float(a)
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_fov(self, s, a):
+		self.cam.fov_deg = float(a)
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_mouse_release(self, s, a):
+		# a may contain button info; regardless, reset drag state
+		self._left_drag_prev = None
+		self._right_drag_prev = None
+		# finalize rectangle selection if active
+		if self._rect_select_active:
+			try:
+				x0, y0 = self._rect_select_start
+				x1, y1 = self._rect_select_end
+				x_min = min(x0, x1); x_max = max(x0, x1)
+				y_min = min(y0, y1); y_max = max(y0, y1)
+				# commit selection only if the rectangle has area
+				if abs(x_max - x_min) > 1 and abs(y_max - y_min) > 1 and self.show_point_centers:
+					self._ensure_exclusion_state()
+					if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+						c2w_used = self._current_c2w_for_projection()
+						with torch.no_grad():
+							points = self.scene.positions
+							px, py, valid = self._project_points_to_pixels(points, c2w_used)
+							px = px.numpy(); py = py.numpy(); valid = valid.numpy()
+							inside = (px >= x_min) & (px <= x_max) & (py >= y_min) & (py <= y_max) & valid
+							inside_t = torch.from_numpy(inside)
+							if self._rect_select_include:
+								# include -> un-exclude
+								self.excluded_mask[inside_t] = False
+							else:
+								# exclude
+								self.excluded_mask[inside_t] = True
+							# keep threshold filters active even when manual mode is off
+							self._sync_exclusion_to_scene()
+			except Exception:
+				pass
+			# clear selection state
+			self._rect_select_active = False
+			self.needs_redraw = True
+			# do not treat this as an orbit drag
+			self._did_left_drag = False
+			return
+		# if user performed an orbit drag, commit the camera's current up as new yaw axis
+		if self._did_left_drag:
+			self.cam.commit_up_from_camera()
+			self._did_left_drag = False
+			try:
+				dpg.set_value(self.yaw_slider, self.cam.yaw)
+				dpg.set_value(self.pitch_slider, self.cam.pitch)
+			except Exception:
+				pass
+			self.needs_redraw = True
+
+	def _on_mouse_drag(self, s, a):
+		if not self._mouse_over_render():
+			return
+		# If exclusion rectangle selection is active (Shift held), consume the drag for selection
+		shift_down = False
+		try:
+			shift_down = dpg.is_key_down(dpg.mvKey_LShift) or dpg.is_key_down(dpg.mvKey_RShift)
+		except Exception:
+			try:
+				shift_down = dpg.is_key_down(dpg.mvKey_Shift)
+			except Exception:
+				shift_down = False
+		if self.enable_exclude_select and self.show_point_centers and shift_down:
+			# initialize selection on first drag tick
+			if not self._rect_select_active:
+				# record start in drawing-local coordinates
+				try:
+					lx, ly = dpg.get_drawing_mouse_pos()
+				except Exception:
+					mx, my = dpg.get_mouse_pos()
+					try:
+						pmin = dpg.get_item_rect_min(self.draw_image_id)
+					except Exception:
+						pmin = dpg.get_item_rect_min(self.drawlist)
+					lx = mx - pmin[0]
+					ly = my - pmin[1]
+				self._rect_select_start = (float(lx), float(ly))
+				# include when ctrl is also down
+				ctrl_down = False
+				try:
+					ctrl_down = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+				except Exception:
+					try:
+						ctrl_down = dpg.is_key_down(dpg.mvKey_Control)
+					except Exception:
+						ctrl_down = False
+				self._rect_select_include = bool(ctrl_down)
+				self._rect_select_active = True
+			# always update current end point
+			try:
+				lx, ly = dpg.get_drawing_mouse_pos()
+			except Exception:
+				mx, my = dpg.get_mouse_pos()
+				try:
+					pmin = dpg.get_item_rect_min(self.draw_image_id)
+				except Exception:
+					pmin = dpg.get_item_rect_min(self.drawlist)
+				lx = mx - pmin[0]
+				ly = my - pmin[1]
+			self._rect_select_end = (float(lx), float(ly))
+			# do not orbit while selecting
+			return
+		dx, dy = a[1], a[2]
+		# compute incremental delta from cumulative drag deltas
+		if self._left_drag_prev is None:
+			self._left_drag_prev = (dx, dy)
+			return
+		inc_dx = dx - self._left_drag_prev[0]
+		inc_dy = dy - self._left_drag_prev[1]
+		self._left_drag_prev = (dx, dy)
+		if abs(inc_dx) + abs(inc_dy) > 0:
+			self._invalidate_psnr()
+			# use orbit_by so orbit follows rolled up/right
+			self.cam.orbit_by(inc_dx, inc_dy, sensitivity=0.005)
+			self._did_left_drag = True
+			# sync sliders
+			try:
+				dpg.set_value(self.yaw_slider, self.cam.yaw)
+				dpg.set_value(self.pitch_slider, self.cam.pitch)
+			except Exception:
+				pass
+			self.needs_redraw = True
+
+	def _on_mouse_drag_right(self, s, a):
+		if not self._mouse_over_render():
+			return
+		dx, dy = a[1], a[2]
+		# compute incremental delta from cumulative drag deltas
+		if self._right_drag_prev is None:
+			self._right_drag_prev = (dx, dy)
+			return
+		inc_dx = dx - self._right_drag_prev[0]
+		inc_dy = dy - self._right_drag_prev[1]
+		self._right_drag_prev = (dx, dy)
+		if abs(inc_dx) + abs(inc_dy) > 0:
+			self._invalidate_psnr()
+			self.cam.pan(inc_dx, -inc_dy)
+			self.needs_redraw = True
+
+	def _on_mouse_wheel(self, s, a):
+		if not self._mouse_over_render():
+			return
+		# a may be scalar delta or (x, y) where y is wheel delta
+		if isinstance(a, (list, tuple)):
+			if len(a) >= 2:
+				delta = a[1]
+			elif len(a) == 1:
+				delta = a[0]
+			else:
+				delta = 0
+		else:
+			delta = a
+		self.cam.radius = float(np.clip(self.cam.radius * (0.9 if delta > 0 else 1.1), 0.3, 5.0))
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_screenshot(self):
+		ts = time.strftime("%Y%m%d_%H%M%S")
+		path = os.path.join(self.args.output_dir, f"shot_{ts}.npy")
+		if hasattr(self, "last_frame"):
+			np.save(path, self.last_frame)
+			print("Saved", path)
+
+	def _on_resize_height(self, s, a):
+		# Adjust render size based on height slider, preserve aspect
+		try:
+			new_h = int(a)
+		except Exception:
+			return
+		new_w = int(round(self.aspect * float(new_h)))
+		if new_w == self.W and new_h == self.H:
+			return
+		self.W = new_w
+		self.H = new_h
+		# move controls to the right of the render area
+		try:
+			dpg.configure_item(self.render_win, width=self.W, height=self.H)
+			dpg.configure_item(self.drawlist, width=self.W, height=self.H)
+			dpg.configure_item(self.draw_image_id, pmin=(0, 0), pmax=(self.W, self.H))
+			dpg.set_value(self.size_slider, self.H)
+		except Exception:
+			pass
+		# update camera and texture
+		# Camera stays at base resolution (do not change to avoid re-tracing rays count)
+		self._recreate_texture_and_draw()
+
+	def _on_render_window_resized(self, sender, app_data):
+		# app_data is (new_width, new_height) but DearPyGui may not pass it consistently; query directly
+		try:
+			win_w = int(dpg.get_item_width(self.render_win))
+			win_h = int(dpg.get_item_height(self.render_win))
+		except Exception:
+			return
+		# Compute target size preserving aspect; shrink to fit if needed
+		target_h = max(1, win_h)
+		target_w = int(round(self.aspect * float(target_h)))
+		if target_w > win_w:
+			target_w = max(1, win_w)
+			target_h = int(round(float(target_w) / max(1e-6, self.aspect)))
+		# Update sizes and reposition the drawn image within drawlist
+		if target_w != self.W or target_h != self.H:
+			self.W = int(target_w)
+			self.H = int(target_h)
+			# Resize drawlist first (no texture change yet)
+			try:
+				dpg.configure_item(self.drawlist, width=self.W, height=self.H)
+				dpg.configure_item(self.draw_image_id, pmin=(0, 0), pmax=(self.W, self.H))
+				self._recreate_texture_and_draw()
+			except Exception:
+				self._recreate_texture_and_draw()
+
+	def _on_toggle_white_bg(self, s, a):
+		try:
+			self.white_bg = bool(a)
+			self.needs_redraw = True
+			self._invalidate_psnr()
+		except Exception:
+			pass
+
+	def _on_select_view(self, s, a):
+		# a may be label like "12 (IMG_0123.jpg)"; resolve to index
+		idx = None
+		if isinstance(a, str) and self.dataset_label_to_index:
+			idx = self.dataset_label_to_index.get(a, None)
+		if idx is None:
+			try:
+				idx = int(a)
+			except Exception:
+				idx = None
+		self.dataset_cam_idx = idx
+		if idx is not None:
+			self._apply_dataset_pose_to_camera(idx)
+			# prepare to compute PSNR on next render (unlocked only)
+			self._psnr_pending_idx = idx
+			# add a one-frame delay to ensure pose/FOV changes are fully reflected in rays
+			self._psnr_delay_frames = 1
+			self._psnr_valid = False
+			try:
+				dpg.set_value(self.psnr_text, "PSNR: invalid")
+			except Exception:
+				pass
+		self.needs_redraw = True
+
+	def _on_toggle_lock_view(self, s, a):
+		# a is boolean
+		self.use_dataset_pose = bool(a)
+		self.needs_redraw = True
+		# PSNR only applies when unlocked
+		self._invalidate_psnr()
+
+	def _on_toggle_overlay(self, s, a):
+		self.show_point_centers = bool(a)
+		self.needs_redraw = True
+
+	def _on_toggle_exclude_mode(self, s, a):
+		self.enable_exclude_select = bool(a)
+		# enable/disable bulk buttons only when exclusion mode is on
+		try:
+			dpg.configure_item(self.btn_all_set, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.btn_all_reset, enabled=self.enable_exclude_select)
+		except Exception:
+			pass
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_toggle_scale_filter(self, s, a):
+		self.enable_scale_filter = bool(a)
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_scale_threshold(self, s, a):
+		try:
+			self.scale_filter_threshold = float(np.clip(float(a), 0.0, 1.0))
+		except Exception:
+			return
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_scale_mode(self, s, a):
+		mode = str(a)
+		self.scale_filter_mode_small = (mode == "exclude < threshold")
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_toggle_sigma_filter(self, s, a):
+		self.enable_sigma_filter = bool(a)
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_sigma_threshold(self, s, a):
+		try:
+			self.sigma_filter_threshold = max(0.0, float(a))
+		except Exception:
+			return
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _set_vlm_status(self, msg: str):
+		self.vlm_status = str(msg)
+		try:
+			dpg.set_value(self.vlm_status_text, f"Query status: {self.vlm_status}")
+		except Exception:
+			pass
+
+	def _sanitize_vlm_labels(self, labels) -> list[str]:
+		out = []
+		seen = set()
+		if not isinstance(labels, (list, tuple)):
+			return out
+		for item in labels:
+			label = str(item).strip()
+			if (label != "") and (label not in seen):
+				out.append(label)
+				seen.add(label)
+		return out
+
+	def _load_vlm_candidate_labels(self, cfg_path: str) -> list[str]:
+		fallback = ["car", "tree", "building", "sidewalk", "road"]
+		if yaml is None:
+			print("[viewer] PyYAML unavailable. Using fallback VLM labels.")
+			return fallback
+		if (cfg_path is None) or (str(cfg_path).strip() == ""):
+			return fallback
+		if not os.path.isfile(cfg_path):
+			print(f"[viewer] VLM label config not found: {cfg_path}. Using fallback labels.")
+			return fallback
+		try:
+			with open(cfg_path, "r", encoding="utf-8") as f:
+				cfg = yaml.safe_load(f)
+		except Exception as e:
+			print(f"[viewer] Failed to parse VLM label config {cfg_path}: {e}. Using fallback labels.")
+			return fallback
+
+		labels = None
+		if isinstance(cfg, dict):
+			edit_cfg = cfg.get("edit", None)
+			if isinstance(edit_cfg, dict) and isinstance(edit_cfg.get("objects", None), (list, tuple)):
+				labels = edit_cfg.get("objects", None)
+			if labels is None and isinstance(cfg.get("candidate_labels", None), (list, tuple)):
+				labels = cfg.get("candidate_labels", None)
+			if labels is None:
+				vlm_cfg = cfg.get("vlm", None)
+				if isinstance(vlm_cfg, dict) and isinstance(vlm_cfg.get("candidate_labels", None), (list, tuple)):
+					labels = vlm_cfg.get("candidate_labels", None)
+		elif isinstance(cfg, (list, tuple)):
+			labels = cfg
+
+		sanitized = self._sanitize_vlm_labels(labels)
+		if len(sanitized) == 0:
+			print(f"[viewer] No valid labels in {cfg_path}. Using fallback labels.")
+			return fallback
+		return sanitized
+
+	def _get_vlm_target_index(self) -> int:
+		if len(self.vlm_candidate_labels) == 0:
+			return 0
+		try:
+			return int(self.vlm_candidate_labels.index(self.vlm_target_label))
+		except Exception:
+			self.vlm_target_label = self.vlm_candidate_labels[0]
+			return 0
+
+	def _sync_selected_query_embedding(self):
+		self.vlm_query_text = self.vlm_target_label
+		self.vlm_query_embedding = None
+		if not torch.is_tensor(self.vlm_prompt_embeddings):
+			self._update_vlm_embedding_text()
+			return
+		if self.vlm_prompt_embeddings.ndim != 2 or int(self.vlm_prompt_embeddings.shape[0]) == 0:
+			self._update_vlm_embedding_text()
+			return
+		idx = self._get_vlm_target_index()
+		if idx < 0 or idx >= int(self.vlm_prompt_embeddings.shape[0]):
+			self._update_vlm_embedding_text()
+			return
+		self.vlm_query_embedding = self.vlm_prompt_embeddings[idx]
+		self._update_vlm_embedding_text()
+
+	def _encode_vlm_prompt_set(self):
+		if len(self.vlm_candidate_labels) == 0:
+			raise RuntimeError("no candidate labels configured.")
+		encoder = self._ensure_vlm_encoder()
+		texts = [label.replace("_", " ") for label in self.vlm_candidate_labels]
+		prompt_emb = encoder.encode_texts(texts).detach().float().to(self.device)
+		if prompt_emb.ndim != 2 or int(prompt_emb.shape[0]) != len(self.vlm_candidate_labels):
+			raise RuntimeError("invalid prompt embedding shape.")
+		self.vlm_prompt_embeddings = prompt_emb
+		self._sync_selected_query_embedding()
+		return prompt_emb
+
+	def _update_vlm_embedding_text(self):
+		if self.vlm_query_embedding is None:
+			text = f"Current Label Embedding: None (labels={len(self.vlm_candidate_labels)})"
+		else:
+			try:
+				vec = self.vlm_query_embedding.detach().float().cpu().reshape(-1)
+				head = ", ".join([f"{float(v):.4f}" for v in vec[:8].tolist()])
+				suffix = ", ..." if int(vec.numel()) > 8 else ""
+				text = f"Current Label Embedding '{self.vlm_target_label}' (dim={int(vec.numel())}): [{head}{suffix}]"
+			except Exception:
+				text = "Current Label Embedding: <unavailable>"
+		try:
+			dpg.set_value(self.vlm_embedding_text, text)
+		except Exception:
+			pass
+
+	def _on_vlm_threshold(self, s, a):
+		try:
+			self.vlm_threshold = float(np.clip(float(a), 0.0, 1.0))
+		except Exception:
+			return
+
+	def _on_vlm_target_label(self, s, a):
+		label = str(a).strip()
+		if label == "" or label not in self.vlm_candidate_labels:
+			return
+		self.vlm_target_label = label
+		self._sync_selected_query_embedding()
+		self._set_vlm_status(f"selected label '{self.vlm_target_label}'")
+
+	def _on_vlm_operation(self, s, a):
+		op = str(a).strip().lower()
+		if op in {"deletion", "extraction"}:
+			self.vlm_operation = op
+
+	def _ensure_vlm_encoder(self):
+		if self.vlm_encoder is None:
+			self.vlm_encoder = CLIPTextEncoder(
+				device=self.device,
+				model_name=str(self.args.clip_model),
+				download_root=str(self.args.clip_download_root),
+			)
+		return self.vlm_encoder
+
+	def _on_encode_query(self, s=None, a=None):
+		try:
+			emb = self._encode_vlm_prompt_set()
+			self._set_vlm_status(f"encoded label set ({int(emb.shape[0])} labels, dim={int(emb.shape[1])})")
+		except Exception as e:
+			self.vlm_prompt_embeddings = None
+			self.vlm_query_embedding = None
+			self._update_vlm_embedding_text()
+			self._set_vlm_status(f"label-set encode failed: {e}")
+
+	def _strip_state_dict_prefixes(self, state_dict: dict) -> dict:
+		out = {}
+		for k, v in state_dict.items():
+			nk = k
+			if nk.startswith("_orig_mod."):
+				nk = nk[len("_orig_mod."):]
+			if nk.startswith("module."):
+				nk = nk[len("module."):]
+			out[nk] = v
+		return out
+
+	def _ensure_feature_decoder(self, in_dim: int, out_dim: int):
+		if (
+			self._feature_decoder is not None
+			and self._feature_decoder_in_dim == int(in_dim)
+			and self._feature_decoder_out_dim == int(out_dim)
+		):
+			return self._feature_decoder
+		if self.decoder_ckpt_path == "":
+			raise RuntimeError("feature dimension mismatch but --decoder_ckpt is not provided.")
+		if not os.path.isfile(self.decoder_ckpt_path):
+			raise FileNotFoundError(f"decoder checkpoint not found: {self.decoder_ckpt_path}")
+
+		raw = torch.load(self.decoder_ckpt_path, map_location="cpu")
+		if isinstance(raw, dict) and "state_dict" in raw and isinstance(raw["state_dict"], dict):
+			raw = raw["state_dict"]
+		if not isinstance(raw, dict):
+			raise TypeError("decoder checkpoint must be a state_dict-compatible dictionary.")
+		sd = self._strip_state_dict_prefixes(raw)
+		if "net.0.weight" not in sd or "net.4.weight" not in sd:
+			raise KeyError("decoder checkpoint is missing expected keys: net.0.weight/net.4.weight")
+
+		w1 = sd["net.0.weight"]
+		w3 = sd["net.4.weight"]
+		if (w1.ndim != 4) or (w3.ndim != 4):
+			raise ValueError("decoder weights must be Conv2d tensors.")
+		ckpt_in = int(w1.shape[1])
+		hidden = int(w1.shape[0])
+		ckpt_out = int(w3.shape[0])
+		if ckpt_in != int(in_dim) or ckpt_out != int(out_dim):
+			raise ValueError(
+				f"decoder dim mismatch: ckpt_in={ckpt_in}, ckpt_out={ckpt_out}, required_in={in_dim}, required_out={out_dim}"
+			)
+
+		decoder = FeatureUpsampleDecoder(in_dim=int(in_dim), out_dim=int(out_dim), hidden_dim=int(hidden)).to(self.device)
+		decoder.load_state_dict(sd, strict=True)
+		decoder.eval()
+		self._feature_decoder = decoder
+		self._feature_decoder_in_dim = int(in_dim)
+		self._feature_decoder_out_dim = int(out_dim)
+		return self._feature_decoder
+
+	def _get_primitive_semantic_features(self) -> torch.Tensor | None:
+		try:
+			feat = getattr(self.scene, "feat_attr", None)
+			if not torch.is_tensor(feat):
+				return None
+			if feat.ndim != 2 or feat.numel() == 0:
+				return None
+			return feat.detach().float().to(self.device)
+		except Exception:
+			return None
+
+	def _project_primitive_features(self, feat: torch.Tensor, target_dim: int) -> torch.Tensor:
+		if int(feat.shape[1]) == int(target_dim):
+			return feat
+		decoder = self._ensure_feature_decoder(int(feat.shape[1]), int(target_dim))
+		with torch.no_grad():
+			decoded = decoder(feat.unsqueeze(-1).unsqueeze(-1)).squeeze(-1).squeeze(-1)
+		return decoded
+
+	def _on_apply_vlm_operation(self, s=None, a=None):
+		if len(self.vlm_candidate_labels) == 0:
+			self._set_vlm_status("no candidate labels configured.")
+			return
+		if (not torch.is_tensor(self.vlm_prompt_embeddings)) or self.vlm_prompt_embeddings.ndim != 2 or int(self.vlm_prompt_embeddings.shape[0]) != len(self.vlm_candidate_labels):
+			try:
+				self._encode_vlm_prompt_set()
+			except Exception as e:
+				self._set_vlm_status(f"failed to encode label set: {e}")
+				return
+
+		target_idx = self._get_vlm_target_index()
+		self._sync_selected_query_embedding()
+		if self.vlm_query_embedding is None:
+			self._set_vlm_status("selected label embedding unavailable.")
+			return
+
+		feat = self._get_primitive_semantic_features()
+		if feat is None:
+			self._set_vlm_status("scene has no per-primitive semantic vector (feat_attr).")
+			return
+
+		prompts = self.vlm_prompt_embeddings.detach().float().to(self.device)
+		if prompts.ndim != 2 or int(prompts.shape[0]) == 0:
+			self._set_vlm_status("invalid prompt embeddings.")
+			return
+		try:
+			feat_cmp = self._project_primitive_features(feat, int(prompts.shape[1]))
+		except Exception as e:
+			self._set_vlm_status(f"feature projection failed: {e}")
+			return
+		if feat_cmp.ndim != 2 or int(feat_cmp.shape[1]) != int(prompts.shape[1]):
+			self._set_vlm_status("projected feature dimension mismatch.")
+			return
+
+		op = str(self.vlm_operation).strip().lower()
+		if op not in {"deletion", "extraction"}:
+			self._set_vlm_status(f"unsupported operation: {op}")
+			return
+
+		with torch.no_grad():
+			feat_n = F.normalize(feat_cmp, dim=1)
+			prompts_n = F.normalize(prompts, dim=1)
+			sim = torch.matmul(feat_n, prompts_n.t())
+			if int(sim.shape[1]) == 1:
+				score = sim[:, 0]
+				thr = float(np.clip(self.vlm_threshold, -1.0, 1.0))
+				selected = score >= thr
+				score_mode = "single-prompt-cosine"
+			else:
+				probs = F.softmax(sim, dim=-1)
+				score = probs[:, int(target_idx)]
+				thr = float(np.clip(self.vlm_threshold, 0.0, 1.0))
+				if op == "deletion":
+					argmax_selected = (torch.argmax(probs, dim=-1) == int(target_idx))
+					selected = torch.logical_or((score >= thr), argmax_selected)
+					score_mode = "multi-prompt-softmax+argmax"
+				else:
+					selected = score >= thr
+					score_mode = "multi-prompt-softmax"
+
+		self._ensure_exclusion_state()
+		if self.excluded_mask is None or self.excluded_mask.numel() != selected.numel():
+			self._set_vlm_status("failed to initialize exclusion list for scene.")
+			return
+
+		selected_cpu = selected.detach().cpu()
+		if op == "extraction":
+			new_mask = ~selected_cpu
+		else:
+			new_mask = selected_cpu
+		# non-cumulative apply: always overwrite previous manual query mask.
+		self.excluded_mask = new_mask.clone()
+
+		# auto-enable exclusion path so query operation takes effect immediately
+		self.enable_exclude_select = True
+		try:
+			dpg.set_value(self.exclude_checkbox, True)
+			dpg.configure_item(self.btn_all_set, enabled=True)
+			dpg.configure_item(self.btn_all_reset, enabled=True)
+		except Exception:
+			pass
+
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+		score_stats = score.detach()
+		score_min = float(score_stats.min().item()) if score_stats.numel() > 0 else 0.0
+		score_max = float(score_stats.max().item()) if score_stats.numel() > 0 else 0.0
+		score_mean = float(score_stats.mean().item()) if score_stats.numel() > 0 else 0.0
+		self._set_vlm_status(
+			f"applied {op} [{score_mode}] label='{self.vlm_target_label}': selected={int(selected_cpu.sum().item())}/{int(selected_cpu.numel())}, "
+			f"thr={thr:.3f}, score[min,max,mean]=[{score_min:.3f}, {score_max:.3f}, {score_mean:.3f}]"
+		)
+
+	def _invalidate_psnr(self):
+		# Reset PSNR state and UI
+		self._psnr_valid = False
+		self._psnr_value = None
+		self._psnr_pending_idx = None
+		try:
+			if self.psnr_text is not None:
+				dpg.set_value(self.psnr_text, "PSNR: invalid")
+		except Exception:
+			pass
+
+	def _ensure_exclusion_state(self):
+		# initialize exclusion structures if needed
+		try:
+			N = int(self.scene.positions.shape[0])
+		except Exception:
+			N = 0
+		if (self.excluded_mask is None) or (self.excluded_mask.numel() != N):
+			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
+			self._log_scales_backup = None
+
+	def _compute_relative_scales(self, base_log_scales_cpu: torch.Tensor) -> torch.Tensor | None:
+		"""
+		Compute relative primitive scales in [0, 1] using scene cuboid diagonal:
+		  scene_diag = ||max(positions)-min(positions)||_2
+		  rel_scale = primitive_scale / scene_diag
+		"""
+		try:
+			positions_cpu = self.scene.positions.detach().float().cpu()
+			if positions_cpu.numel() == 0:
+				self._scene_scale_diag = 1.0
+				return None
+			pos_min = positions_cpu.min(dim=0).values
+			pos_max = positions_cpu.max(dim=0).values
+			scene_diag = torch.norm(pos_max - pos_min).item()
+			if (not math.isfinite(scene_diag)) or scene_diag <= 1e-12:
+				scene_diag = 1.0
+			self._scene_scale_diag = float(scene_diag)
+
+			scales = torch.exp(base_log_scales_cpu.detach().float())
+			if scales.ndim == 2:
+				if scales.shape[1] == 1:
+					scale_1d = scales[:, 0]
+				else:
+					scale_1d = torch.max(scales, dim=1).values
+			else:
+				scale_1d = scales.reshape(-1)
+			rel = torch.clamp(scale_1d / float(scene_diag), 0.0, 1.0)
+			if rel.numel() > 0:
+				self._last_scale_rel_stats = (float(rel.min().item()), float(rel.max().item()))
+			return rel
+		except Exception:
+			return None
+
+	def _compute_sigma_proxy(self, n_primitives: int) -> torch.Tensor | None:
+		"""
+		Compute per-primitive sigma-like proxy for thresholding.
+		Priority:
+		  1) density-channel bias (softplus) from b3/lin3.bias
+		  2) alpha_accum fallback
+		"""
+		try:
+			raw = None
+			if hasattr(self.scene, "b3"):
+				b3 = self.scene.b3
+				if torch.is_tensor(b3) and b3.ndim == 2 and b3.shape[1] >= 4:
+					raw = b3[:, 3]
+			if raw is None and hasattr(self.scene, "mlps") and hasattr(self.scene.mlps, "lin3") and hasattr(self.scene.mlps.lin3, "bias"):
+				bias = self.scene.mlps.lin3.bias
+				if torch.is_tensor(bias) and bias.ndim == 2 and bias.shape[1] >= 4:
+					raw = bias[:, 3]
+			if raw is not None:
+				sigma = F.softplus(raw.detach().float()).cpu()
+				if sigma.numel() == n_primitives:
+					if sigma.numel() > 0:
+						self._last_sigma_stats = (float(sigma.min().item()), float(sigma.max().item()))
+					return sigma
+		except Exception:
+			pass
+		try:
+			if hasattr(self.scene, "alpha_accum") and torch.is_tensor(self.scene.alpha_accum):
+				sigma = self.scene.alpha_accum.detach().float().cpu()
+				if sigma.numel() == n_primitives:
+					if sigma.numel() > 0:
+						self._last_sigma_stats = (float(sigma.min().item()), float(sigma.max().item()))
+					return sigma
+		except Exception:
+			pass
+		return None
+
+	def _build_threshold_exclusion_mask(self, n_primitives: int, base_log_scales_cpu: torch.Tensor) -> torch.Tensor:
+		mask = torch.zeros(n_primitives, dtype=torch.bool)
+		if n_primitives == 0:
+			return mask
+		if self.enable_scale_filter:
+			rel = self._compute_relative_scales(base_log_scales_cpu)
+			if rel is not None and rel.numel() == n_primitives:
+				thr = float(np.clip(self.scale_filter_threshold, 0.0, 1.0))
+				if self.scale_filter_mode_small:
+					mask |= (rel < thr)
+				else:
+					mask |= (rel > thr)
+		if self.enable_sigma_filter:
+			sigma = self._compute_sigma_proxy(n_primitives)
+			if sigma is not None and sigma.numel() == n_primitives:
+				mask |= (sigma < float(self.sigma_filter_threshold))
+		return mask
+
+	def _update_filter_stats_ui(self, excluded_count: int | None = None, total_count: int | None = None):
+		if excluded_count is not None:
+			self._last_excluded_count = int(excluded_count)
+		if total_count is not None:
+			self._last_total_count = int(total_count)
+		try:
+			dpg.set_value(
+				self.filter_stats_text,
+				f"Filter stats: excluded={self._last_excluded_count}/{self._last_total_count}, "
+				f"scale_rel[min,max]=[{self._last_scale_rel_stats[0]:.3f}, {self._last_scale_rel_stats[1]:.3f}], "
+				f"sigma[min,max]=[{self._last_sigma_stats[0]:.3f}, {self._last_sigma_stats[1]:.3f}], "
+				f"scene_diag={self._scene_scale_diag:.4f}",
+			)
+		except Exception:
+			pass
+
+	def _sync_exclusion_to_scene(self):
+		manual_enabled = bool(self.enable_exclude_select)
+		auto_enabled = bool(self.enable_scale_filter or self.enable_sigma_filter)
+		if manual_enabled or auto_enabled:
+			self._apply_exclusion_mask_to_scene()
+		else:
+			self._restore_scene_scales()
+			try:
+				total = int(self.scene.positions.shape[0]) if self.scene is not None else 0
+			except Exception:
+				total = 0
+			self._update_filter_stats_ui(excluded_count=0, total_count=total)
+		self.needs_redraw = True
+
+	def _apply_exclusion_mask_to_scene(self):
+		# Apply manual mask + threshold filter masks by shrinking log_scales.
+		self._ensure_exclusion_state()
+		if self.excluded_mask is None:
+			return
+		try:
+			device = self.scene.log_scales.device
+			nls = self.scene.log_scales
+			if self._log_scales_backup is None or self._log_scales_backup.shape != nls.shape:
+				self._log_scales_backup = nls.detach().clone()
+			n_primitives = int(nls.shape[0])
+			base_log_scales_cpu = self._log_scales_backup.detach().float().cpu()
+			auto_mask = self._build_threshold_exclusion_mask(n_primitives, base_log_scales_cpu)
+			manual_mask = torch.zeros(n_primitives, dtype=torch.bool)
+			if self.enable_exclude_select and self.excluded_mask.numel() == n_primitives:
+				manual_mask = self.excluded_mask
+			combined = (manual_mask | auto_mask)
+			self._update_filter_stats_ui(excluded_count=int(combined.sum().item()), total_count=n_primitives)
+			new_vals = self._log_scales_backup.detach().clone().to(device)
+			mask_dev = combined.to(device)
+			if mask_dev.any():
+				new_vals[mask_dev, :] = -20.0  # effectively zero radius
+			with torch.no_grad():
+				nls.copy_(new_vals)
+		except Exception:
+			pass
+		self.needs_redraw = True
+
+	def _restore_scene_scales(self):
+		# Restore original log_scales from backup if available
+		try:
+			if self._log_scales_backup is not None and self.scene is not None:
+				with torch.no_grad():
+					self.scene.log_scales.copy_(self._log_scales_backup.to(self.scene.log_scales.device))
+		except Exception:
+			pass
+
+	def _on_all_set(self):
+		# Exclude all primitives (only active when exclusion mode is enabled)
+		if not self.enable_exclude_select:
+			return
+		self._ensure_exclusion_state()
+		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+			self.excluded_mask[:] = True
+			self._sync_exclusion_to_scene()
+
+	def _on_all_reset(self):
+		# Include all primitives back
+		if not self.enable_exclude_select:
+			return
+		self._ensure_exclusion_state()
+		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
+			self.excluded_mask[:] = False
+			self._sync_exclusion_to_scene()
+
+	def _on_select_ckpt(self, s, a):
+		# a is the selected filename (basename)
+		if not isinstance(a, str):
+			return
+		try:
+			idx = self.ckpt_items.index(a)
+		except Exception:
+			return
+		new_path = self.ckpt_paths[idx]
+		if new_path == self.selected_ckpt_path:
+			return
+		self._reload_scene(new_path)
+		self.needs_redraw = True
+
+	def _on_roll_ccw(self, s=None, a=None):
+		# CCW when looking forward (increase roll)
+		self._invalidate_psnr()
+		self.cam.roll_by(+0.05)
+		self.needs_redraw = True
+
+	def _on_roll_cw(self, s=None, a=None):
+		# CW when looking forward (decrease roll)
+		self._invalidate_psnr()
+		self.cam.roll_by(-0.05)
+		self.needs_redraw = True
+
+	def _on_roll_released(self, s=None, a=None):
+		# Do not rebase to global up here to preserve the effect of roll and avoid flicker
+		# Subsequent orbit drags will rebase to global up on mouse release
+		self.needs_redraw = True
+
+	def _on_dolly_forward(self, s=None, a=None):
+		# Move forward toward the scene along current forward direction
+		step = 0.05 * float(self.cam.radius)
+		self._invalidate_psnr()
+		self.cam.dolly(+step)
+		self.needs_redraw = True
+
+	def _on_dolly_backward(self, s=None, a=None):
+		# Move backward away from the scene along current forward direction
+		step = 0.05 * float(self.cam.radius)
+		self._invalidate_psnr()
+		self.cam.dolly(-step)
+		self.needs_redraw = True
+
+	def _fov_from_focal(self, focal: float, H: int) -> float:
+		# fov = 2 * atan((H/2)/focal)
+		return math.degrees(2.0 * math.atan((0.5 * H) / max(1e-6, focal)))
+
+	def _apply_dataset_pose_to_camera(self, idx: int):
+		# Set orbit camera to exactly match the dataset pose and FOV
+		if self.dataset is None:
+			return
+		try:
+			pose = self.dataset.poses[idx]  # (3,4)
+		except Exception:
+			return
+
+		# Scale up the pose by the dataset scale
+		pose = pose.clone()
+		pose[:3, 3] = pose[:3, 3] / float(self.dataset.scale)
+		avg = torch.as_tensor(self.dataset.avg_position, dtype=torch.float32, device=pose.device)
+		pose[:3, 3] = pose[:3, 3] + avg
+		self.cam.set_pose(pose)
+
+		# match FOV to dataset focal scaled to BASE render height (camera ray grid)
+		if self.dataset_focal is not None and self.dataset_H is not None:
+			target_h = int(self.base_H)
+			if target_h <= 0:
+				target_h = int(self.cam.height)
+			focal_scaled = self.dataset_focal * (float(target_h) / float(self.dataset_H))
+			fov_deg = self._fov_from_focal(focal_scaled, target_h)
+			self.cam.fov_deg = float(np.clip(fov_deg, 30.0, 100.0))
+
+		# update UI sliders to reflect new camera params
+		try:
+			dpg.set_value(self.yaw_slider, self.cam.yaw)
+			dpg.set_value(self.pitch_slider, self.cam.pitch)
+			dpg.set_value(self.radius_slider, self.cam.radius)
+			dpg.set_value(self.fov_slider, self.cam.fov_deg)
+		except Exception:
+			pass
+
+	def _generate_rays_from_dataset_pose(self):
+		# Use selected dataset pose; generate rays at base resolution only
+		pose = self.dataset.poses[self.dataset_cam_idx]  # (3,4)
+		c2w = pose.to(self.device)
+		Ht, Wt = self.base_H, self.base_W
+		# scale focal by base height ratio (preserve vertical FOV)
+		focal_scaled = self.dataset_focal * (float(Ht) / float(self.dataset_H))
+		i, j = torch.meshgrid(torch.arange(Wt, device=self.device), torch.arange(Ht, device=self.device), indexing="xy")
+		dirs = torch.stack([
+			(i - Wt * 0.5) / focal_scaled,
+			(j - Ht * 0.5) / focal_scaled,
+			torch.ones_like(i, dtype=torch.float32)
+		], -1).to(torch.float32)
+		rays_d = torch.sum(dirs[..., None, :] * c2w[:3, :3], -1)
+		rays_o = c2w[:3, 3].expand_as(rays_d)
+		return rays_o.reshape(-1, 3), rays_d.reshape(-1, 3)
+
+	def _recreate_texture_and_draw(self):
+		# Destroy and recreate dynamic texture and update draw_image size mapping
+		try:
+			# create a new texture first with current W,H
+			new_tex = dpg.add_dynamic_texture(self.W, self.H, [0.0]*(self.W*self.H*4), parent=self.tex_reg)
+			# update draw_image to map to new size
+			if self.draw_image_id is not None:
+				dpg.configure_item(self.draw_image_id, pmin=(0, 0), pmax=(self.W, self.H), texture_tag=new_tex)
+			# resize drawlist as well
+			if self.drawlist is not None:
+				dpg.configure_item(self.drawlist, width=self.W, height=self.H)
+			# swap to new texture; keep old texture alive to avoid potential segfaults
+			self.tex_id = new_tex
+		except Exception as e:
+			print("[viewer] Failed to recreate texture:", e)
+		# Keep camera at base resolution; aspect remains constant from initialization
+		self.needs_redraw = True
+
+	def _project_points_to_pixels(self, points_world: torch.Tensor, c2w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+		"""
+		Project 3D points to pixel coordinates for current camera.
+		Returns (px, py, valid_mask) in tensor on CPU.
+		"""
+		w2c_R = c2w[:3, :3].T
+		w2c_t = -w2c_R @ c2w[:3, 3]
+		pts_cam = (w2c_R @ points_world.T) + w2c_t.unsqueeze(1)  # (3,N)
+		x = pts_cam[0]
+		y = pts_cam[1]
+		z = pts_cam[2]
+		valid = z > 1e-6
+		# compute focal for current display size (preserve camera FOV)
+		fov = math.radians(self.cam.fov_deg)
+		f_disp = 0.5 * float(self.H) / math.tan(0.5 * fov)
+		px = (x * f_disp / z) + (self.W * 0.5)
+		# image Y increases downward to match dataset/eval convention
+		py = (y * f_disp / z) + (self.H * 0.5)
+		return px.cpu(), py.cpu(), valid.cpu()
+
+	def _draw_point_centers_overlay(self, frame_cpu: np.ndarray, c2w: torch.Tensor) -> np.ndarray:
+		# frame_cpu: (H,W,4) float32 in [0,1]
+		if not self.show_point_centers:
+			return frame_cpu
+		with torch.no_grad():
+			points = self.scene.positions  # (N,3) on device
+			px, py, valid = self._project_points_to_pixels(points, c2w)
+			px = px.numpy()
+			py = py.numpy()
+			valid = valid.numpy()
+			h, w = self.H, self.W
+			r = int(max(1, self.overlay_point_radius_px))
+			mask_np = None
+			try:
+				if self.excluded_mask is not None and self.excluded_mask.numel() == points.shape[0]:
+					mask_np = self.excluded_mask.numpy()
+			except Exception:
+				mask_np = None
+			# draw points: yellow by default, red if excluded
+			for i in range(px.shape[0]):
+				if not valid[i]:
+					continue
+				xi = int(round(px[i]))
+				yi = int(round(py[i]))
+				if xi < 0 or xi >= w or yi < 0 or yi >= h:
+					continue
+				is_excl = False
+				if mask_np is not None and i < len(mask_np):
+					is_excl = bool(mask_np[i])
+				# small disk
+				for dy in range(-r, r+1):
+					for dx in range(-r, r+1):
+						if dx*dx + dy*dy <= r*r:
+							xp = xi + dx
+							yp = yi + dy
+							if 0 <= xp < w and 0 <= yp < h:
+								if is_excl:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 0.0
+									frame_cpu[yp, xp, 2] = 0.0
+								else:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 1.0
+									frame_cpu[yp, xp, 2] = 0.0
+		return frame_cpu
+
+	def _current_c2w_for_projection(self) -> torch.Tensor:
+		# build the c2w used for current rendering path, including dataset normalization
+		if self.use_dataset_pose and (self.dataset is not None) and (self.dataset_cam_idx is not None):
+			c2w_used = self.dataset.poses[self.dataset_cam_idx].to(self.device)
+		else:
+			c2w_used = self.cam.get_pose().to(self.device)
+			# map to training coords if dataset normalization exists
+			if self.dataset is not None and hasattr(self.dataset, 'avg_position') and hasattr(self.dataset, 'scale'):
+				try:
+					avg_np = self.dataset.avg_position
+					scale_val = float(self.dataset.scale)
+					avg = torch.tensor(avg_np, dtype=torch.float32, device=self.device)
+					c2w_used = c2w_used.clone()
+					c2w_used[:3, 3] = (c2w_used[:3, 3] - avg) * scale_val
+				except Exception:
+					pass
+		return c2w_used
+
+	def _build_projection_matrix(self, near=0.001, far=100.0):
+		fov_rad = math.radians(self.cam.fov_deg)
+		aspect = self.cam.width / self.cam.height
+		t = math.tan(fov_rad / 2.0)
+		r = t * aspect
+		P = torch.zeros(4, 4)
+		P[0, 0] = 1.0 / r
+		P[1, 1] = 1.0 / t
+		P[2, 2] = -(far + near) / (far - near)
+		P[3, 2] = 1.0
+		P[2, 3] = -(2 * far * near) / (far - near)
+		return P
+
+	def _on_mouse_click(self, s, a):
+		# Left-click handler; perform exclusion toggle when enabled and overlay visible with Ctrl pressed
+		# Any click over render invalidates PSNR immediately
+		try:
+			if self._mouse_over_render():
+				self._invalidate_psnr()
+		except Exception:
+			pass
+		try:
+			if not self.enable_exclude_select or not self.show_point_centers:
+				return
+			# check ctrl key
+			ctrl_down = False
+			try:
+				ctrl_down = dpg.is_key_down(dpg.mvKey_LControl) or dpg.is_key_down(dpg.mvKey_RControl)
+			except Exception:
+				try:
+					ctrl_down = dpg.is_key_down(dpg.mvKey_Control)
+				except Exception:
+					ctrl_down = False
+			if not ctrl_down:
+				return
+			if not self._mouse_over_render():
+				return
+			# mouse position in drawing local coords
+			try:
+				lx, ly = dpg.get_drawing_mouse_pos()
+			except Exception:
+				mx, my = dpg.get_mouse_pos()
+				# prefer the image's rect if available, fallback to drawlist
+				try:
+					pmin = dpg.get_item_rect_min(self.draw_image_id)
+				except Exception:
+					pmin = dpg.get_item_rect_min(self.drawlist)
+				lx = mx - pmin[0]
+				ly = my - pmin[1]
+			if lx < 0 or ly < 0 or lx >= self.W or ly >= self.H:
+				return
+			self._ensure_exclusion_state()
+			if self.excluded_mask is None or self.excluded_mask.numel() == 0:
+				return
+			c2w_used = self._current_c2w_for_projection()
+			with torch.no_grad():
+				points = self.scene.positions
+				px, py, valid = self._project_points_to_pixels(points, c2w_used)
+				px = px.numpy(); py = py.numpy(); valid = valid.numpy()
+				best_i = -1; best_d2 = 1e9
+				pick_r = max(3, int(self.overlay_point_radius_px) + 2)
+				for i in range(px.shape[0]):
+					if not valid[i]:
+						continue
+					dx = px[i] - lx; dy = py[i] - ly
+					d2 = float(dx*dx + dy*dy)
+					if d2 < best_d2 and d2 <= (pick_r * pick_r):
+						best_d2 = d2; best_i = i
+				if best_i >= 0:
+					self.excluded_mask[best_i] = ~self.excluded_mask[best_i]
+					self._sync_exclusion_to_scene()
+					self.needs_redraw = True
+		except Exception:
+			pass
+
+	def _finalize_profiling(self):
+		"""Best-effort close profiling ranges so Nsight can flush a report."""
+		# Close NVTX capture window if still open
+		if self._profile_nvtx_window_open and hasattr(torch.cuda, "nvtx"):
+			try:
+				torch.cuda.nvtx.range_pop()
+			except Exception:
+				pass
+			self._profile_nvtx_window_open = False
+
+		# Stop cudaProfiler if it was started
+		if self._profile_started and hasattr(torch.cuda, "profiler"):
+			try:
+				torch.cuda.profiler.stop()
+			except Exception:
+				pass
+
+	def _render_once(self):
+		frame_idx = self._rendered_frames
+		profile_frame = (
+			self._profile_nvtx_enabled
+			and (not self._profile_done)
+			and (frame_idx >= self._profile_warmup_frames)
+			and (frame_idx < self._profile_warmup_frames + self._profile_frames)
+		)
+		last_profile_frame = (
+			self._profile_nvtx_enabled
+			and (self._profile_frames > 0)
+			and (frame_idx == self._profile_warmup_frames + self._profile_frames - 1)
+		)
+
+		# Optional: open/close a single NVTX range covering the whole capture window.
+		# This makes --capture-range=nvtx reliable without needing to match per-frame names.
+		if self._profile_nvtx_enabled and hasattr(torch.cuda, "nvtx"):
+			try:
+				if profile_frame and (not self._profile_nvtx_window_open):
+					torch.cuda.nvtx.range_push("viewer/profile_window")
+					self._profile_nvtx_window_open = True
+				elif self._profile_nvtx_window_open and last_profile_frame:
+					# Close after rendering the last frame in window (range_pop below after impl)
+					pass
+			except Exception:
+				pass
+
+		# Start/stop profiling window using cudaProfiler API (works well with Nsight)
+		if profile_frame and (not self._profile_started) and hasattr(torch.cuda, "profiler"):
+			try:
+				torch.cuda.profiler.start()
+				self._profile_started = True
+			except Exception:
+				pass
+
+		with _nvtx_range(f"viewer/frame_{frame_idx}", profile_frame):
+			self._render_once_impl(profile_frame=profile_frame, frame_idx=frame_idx)
+
+		# Close NVTX capture window range after last frame is rendered
+		if self._profile_nvtx_window_open and last_profile_frame and hasattr(torch.cuda, "nvtx"):
+			try:
+				torch.cuda.nvtx.range_pop()
+			except Exception:
+				pass
+			self._profile_nvtx_window_open = False
+
+		# Mark done after last frame regardless of cudaProfiler availability
+		if last_profile_frame:
+			self._profile_done = True
+
+		# End profiling window after the last captured frame (cudaProfiler API)
+		if self._profile_started and hasattr(torch.cuda, "profiler"):
+			if last_profile_frame:
+				try:
+					torch.cuda.profiler.stop()
+				except Exception:
+					pass
+
+	def _render_once_impl(self, profile_frame: bool, frame_idx: int):
+		# 1) Render base resolution with MLP
+		with _nvtx_range("viewer/generate_rays", profile_frame):
+			if self.use_dataset_pose and (self.dataset is not None) and (self.dataset_cam_idx is not None):
+				rays_o, rays_d = self._generate_rays_from_dataset_pose()
+				Ht_exp, Wt_exp = self.base_H, self.base_W
+				c2w_used = self.dataset.poses[self.dataset_cam_idx].to(self.device)
+			else:
+				# camera rays from interactive orbit camera
+				rays_o, rays_d = self.cam.generate_rays(self.device)
+				Ht_exp, Wt_exp = int(self.cam.height), int(self.cam.width)
+				c2w_used = self.cam.get_pose().to(self.device)
+				# If dataset normalization exists, map camera pose and rays to training (normalized) coords
+				if self.dataset is not None and hasattr(self.dataset, 'avg_position') and hasattr(self.dataset, 'scale'):
+					try:
+						avg_np = self.dataset.avg_position
+						scale_val = float(self.dataset.scale)
+						avg = torch.tensor(avg_np, dtype=torch.float32, device=self.device)
+						# normalize ray origins: o' = scale * (o - avg)
+						rays_o = (rays_o - avg) * scale_val
+						# directions need no scaling (unit-length downstream) so keep as is
+						# normalize camera pose translation similarly
+						c2w_used = c2w_used.clone()
+						c2w_used[:3, 3] = (c2w_used[:3, 3] - avg) * scale_val
+					except Exception:
+						pass
+
+		# guard against any mismatch between expected HxW and rays count
+		num_rays = int(rays_o.shape[0])
+		if Ht_exp * Wt_exp != num_rays:
+			# try base dims
+			if self.base_H * self.base_W == num_rays:
+				Ht_exp, Wt_exp = self.base_H, self.base_W
+			# try camera dims
+			elif int(self.cam.height) * int(self.cam.width) == num_rays:
+				Ht_exp, Wt_exp = int(self.cam.height), int(self.cam.width)
+			# try factoring by base_W
+			elif self.base_W > 0 and num_rays % self.base_W == 0:
+				Ht_exp, Wt_exp = num_rays // self.base_W, self.base_W
+			# try factoring by base_H
+			elif self.base_H > 0 and num_rays % self.base_H == 0:
+				Ht_exp, Wt_exp = self.base_H, num_rays // self.base_H
+
+		# render at inferred H,W
+		if self.args.engine == 'tile_cuda':
+			# tile_cuda engine requires view/proj matrices and full image render
+			with _nvtx_range("viewer/tile_cuda_setup", profile_frame):
+				c2w_h = torch.cat([c2w_used, torch.tensor([[0,0,0,1]], device=c2w_used.device, dtype=c2w_used.dtype)], dim=0)
+				view_matrix = torch.inverse(c2w_h)
+				proj_matrix = self._build_projection_matrix().to(self.device)
+
+				if hasattr(self.scene, 'set_image_size'):
+					self.scene.set_image_size(Wt_exp, Ht_exp)
+					
+				bg_color_val = 1.0 if self.white_bg else 0.0
+			with _nvtx_range("viewer/tile_cuda_scene_call", profile_frame):
+				rgb = self.scene(
+					rays_o, 
+					rays_d, 
+					bg_color=bg_color_val,
+					view_matrix=view_matrix,
+					proj_matrix=proj_matrix
+				).view(Ht_exp, Wt_exp, 3)
+		else:
+			with _nvtx_range("viewer/render_scene", profile_frame):
+				rgb = render_scene(self.scene, rays_o, rays_d, Ht_exp, Wt_exp, batch_size=self.batch_size, bg_white=self.white_bg)
+
+		# if inferred dims differ from base dims, adapt base frame accordingly
+		if (Ht_exp, Wt_exp) != (self.base_H, self.base_W):
+			frame_base = torch.cat([rgb, torch.ones(Ht_exp, Wt_exp, 1, device=rgb.device)], dim=-1)
+			# resample to base for consistent caching
+			fb = frame_base.permute(2, 0, 1).unsqueeze(0)
+			fb_base = F.interpolate(fb, size=(self.base_H, self.base_W), mode='bilinear', align_corners=False)
+			frame_base = fb_base.squeeze(0).permute(1, 2, 0)
+		else:
+			frame_base = torch.cat([rgb, torch.ones(self.base_H, self.base_W, 1, device=rgb.device)], dim=-1)
+
+		# Compute PSNR once when unlocked and exactly at a dataset pose
+		if (not self.use_dataset_pose) and (self.dataset is not None) and (self.dataset_cam_idx is not None) and (self._psnr_pending_idx == self.dataset_cam_idx) and (not self._psnr_valid) and (self._psnr_delay_frames == 0):
+			try:
+				with torch.no_grad():
+					Hb, Wb = int(frame_base.shape[0]), int(frame_base.shape[1])
+					gt = self.dataset.images[self.dataset_cam_idx].to(frame_base.device)  # (C,H,W) in [0,1]
+					if gt.shape[1] != Hb or gt.shape[2] != Wb:
+						gt = F.interpolate(gt.unsqueeze(0), size=(Hb, Wb), mode='bilinear', align_corners=False).squeeze(0)
+					gt = gt.permute(1, 2, 0).contiguous()  # (Hb,Wb,3)
+					pred = frame_base[..., :3].clamp(0.0, 1.0)
+					mse = torch.mean((pred - gt) ** 2)
+					if torch.isfinite(mse) and float(mse.item()) > 0.0:
+						psnr_val = - 10.0 * torch.log10(mse).item()
+					else:
+						psnr_val = float('inf')
+					self._psnr_value = float(psnr_val)
+					self._psnr_valid = True
+					try:
+						if math.isfinite(self._psnr_value):
+							dpg.set_value(self.psnr_text, f"PSNR: {self._psnr_value:.2f} dB")
+						else:
+							dpg.set_value(self.psnr_text, "PSNR: inf dB")
+					except Exception:
+						pass
+			except Exception:
+				pass
+
+		# 2) Upsample to current display size with bilinear (no extra dependency)
+		if self.W != self.base_W or self.H != self.base_H:
+			with _nvtx_range("viewer/upsample", profile_frame):
+				fb = frame_base.permute(2, 0, 1).unsqueeze(0)  # 1x4xHb x Wb
+				fb_up = F.interpolate(fb, size=(self.H, self.W), mode='bilinear', align_corners=False)
+				frame_disp = fb_up.squeeze(0).permute(1, 2, 0)
+		else:
+			frame_disp = frame_base
+
+		with _nvtx_range("viewer/gpu_to_cpu", profile_frame):
+			frame_disp_cpu = frame_disp.detach().cpu().numpy().astype(np.float32)
+		self.last_frame_base = frame_base.detach().cpu().numpy().astype(np.float32)
+		# 3) Optional overlay in display space
+		frame_disp_cpu = self._draw_point_centers_overlay(frame_disp_cpu, c2w_used)
+		# 4) Upload to texture
+		with _nvtx_range("viewer/upload_texture", profile_frame):
+			dpg.set_value(self.tex_id, frame_disp_cpu.reshape(-1).tolist())
+		self.last_frame = frame_disp_cpu
+
+		# Decrement PSNR delay counter at end of a successful render
+		if self._psnr_delay_frames > 0:
+			self._psnr_delay_frames -= 1
+
+	def _scan_ckpt_dir(self):
+		# Populate ckpt_items and ckpt_paths sorted by mtime desc
+		files = []
+		for name in os.listdir(self.ckpt_dir):
+			if name.endswith('.pt'):
+				full = os.path.join(self.ckpt_dir, name)
+				try:
+					mtime = os.path.getmtime(full)
+				except Exception:
+					mtime = 0.0
+				files.append((mtime, name, full))
+		files.sort(key=lambda x: x[0], reverse=True)
+		self.ckpt_items = [n for _, n, _ in files]
+		self.ckpt_paths = [p for _, _, p in files]
+
+	def _reload_scene(self, ckpt_path: str):
+		# Replace current scene with a new one from ckpt_path
+		try:
+			new_scene = build_scene_from_ckpt(ckpt_path, self.device, engine=self.args.engine)
+		except Exception as e:
+			print(f"[viewer] Failed to load checkpoint {ckpt_path}: {e}")
+			return
+		# swap
+		old = getattr(self, 'scene', None)
+		self.scene = new_scene
+		self.selected_ckpt_path = ckpt_path
+		self._feature_decoder = None
+		self._feature_decoder_in_dim = None
+		self._feature_decoder_out_dim = None
+		# reset exclusion state for the new scene
+		try:
+			N = int(self.scene.positions.shape[0])
+			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
+			self._log_scales_backup = None
+			self._scene_scale_diag = 1.0
+			self._last_scale_rel_stats = (0.0, 0.0)
+			self._last_sigma_stats = (0.0, 0.0)
+			self._last_excluded_count = 0
+			self._last_total_count = N
+		except Exception:
+			self.excluded_mask = None
+			self._log_scales_backup = None
+			self._scene_scale_diag = 1.0
+			self._last_scale_rel_stats = (0.0, 0.0)
+			self._last_sigma_stats = (0.0, 0.0)
+			self._last_excluded_count = 0
+			self._last_total_count = 0
+		# best effort free
+		try:
+			del old
+			if self.device.type == 'cuda':
+				torch.cuda.empty_cache()
+		except Exception:
+			pass
+		self._sync_exclusion_to_scene()
+		self._set_vlm_status("scene reloaded")
+
+	def run(self):
+		try:
+			while dpg.is_dearpygui_running():
+				now = time.time()
+
+				# FPS calculation (UI only)
+				self.frame_count_for_fps += 1
+				if (now - self.last_fps_time) > 0.5:
+					fps = self.frame_count_for_fps / (now - self.last_fps_time)
+					if self.fps_text:
+						dpg.set_value(self.fps_text, f"FPS: {fps:.1f}")
+					self.last_fps_time = now
+					self.frame_count_for_fps = 0
+
+				# Redraw logic
+				should_render = self.needs_redraw or (now - self.last_render_time) > (1.0 / 3.0)
+				# In profiling mode, render as fast as possible to finish the capture window quickly.
+				if self._profile_nvtx_enabled and (not self._profile_done):
+					should_render = True
+
+				if should_render:
+					self._render_once()
+					self._rendered_frames += 1
+					self.last_render_time = now
+					self.needs_redraw = False
+
+					# Optional auto-exit for scripted profiling runs
+					if self._exit_after_profile and self._profile_done:
+						break
+				
+				dpg.render_dearpygui_frame()
+		except KeyboardInterrupt:
+			# Ensure profiling sessions flush even on Ctrl+C
+			pass
+		finally:
+			self._finalize_profiling()
+			dpg.destroy_context()
+
+
+def main():
+	args = parse_args()
+	app = ViewerApp(args)
+	app.run()
+
+
+if __name__ == "__main__":
+	main()

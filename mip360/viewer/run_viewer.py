@@ -124,6 +124,17 @@ class ViewerApp:
 		self.enable_exclude_select = False
 		self.excluded_mask = None  # torch.bool on CPU sized to num_primitives
 		self._log_scales_backup = None  # backup of original log_scales for restore
+		# threshold filters for pruning preview
+		self.enable_scale_filter = False
+		self.scale_filter_threshold = 0.05  # relative scale threshold in [0, 1]
+		self.scale_filter_mode_small = True  # True: exclude smaller-than-threshold
+		self.enable_sigma_filter = False
+		self.sigma_filter_threshold = 0.01
+		self._scene_scale_diag = 1.0
+		self._last_scale_rel_stats = (0.0, 0.0)
+		self._last_sigma_stats = (0.0, 0.0)
+		self._last_excluded_count = 0
+		self._last_total_count = 0
 		# PSNR status (default invalid)
 		self._psnr_valid = False
 		self._psnr_value = None
@@ -218,6 +229,30 @@ class ViewerApp:
 			self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
 			self.btn_all_set = dpg.add_button(label="all-set", callback=self._on_all_set, enabled=False)
 			self.btn_all_reset = dpg.add_button(label="all-reset", callback=self._on_all_reset, enabled=False)
+			# Threshold filters (for pruning preview)
+			self.scale_filter_checkbox = dpg.add_checkbox(label="Enable scale filter", default_value=False, callback=self._on_toggle_scale_filter)
+			self.scale_mode_combo = dpg.add_combo(
+				label="Scale filter mode",
+				items=["exclude < threshold", "exclude > threshold"],
+				default_value="exclude < threshold",
+				callback=self._on_scale_mode,
+			)
+			self.scale_thresh_slider = dpg.add_slider_float(
+				label="Scale threshold (relative)",
+				default_value=float(self.scale_filter_threshold),
+				min_value=0.0,
+				max_value=1.0,
+				callback=self._on_scale_threshold,
+			)
+			self.sigma_filter_checkbox = dpg.add_checkbox(label="Enable sigma filter", default_value=False, callback=self._on_toggle_sigma_filter)
+			self.sigma_thresh_slider = dpg.add_slider_float(
+				label="Sigma threshold",
+				default_value=float(self.sigma_filter_threshold),
+				min_value=0.0,
+				max_value=5.0,
+				callback=self._on_sigma_threshold,
+			)
+			self.filter_stats_text = dpg.add_text(default_value="Filter stats: excluded=0/0, scale_rel[min,max]=[0.000, 0.000], sigma[min,max]=[0.000, 0.000], scene_diag=1.0000")
 		with dpg.window(label="Render", width=self.W, height=self.H, pos=(10, 10)) as self.render_win:
 			with dpg.drawlist(width=self.W, height=self.H) as self.drawlist:
 				self.draw_image_id = dpg.draw_image(self.tex_id, (0, 0), (self.W, self.H))
@@ -300,11 +335,8 @@ class ViewerApp:
 							else:
 								# exclude
 								self.excluded_mask[inside_t] = True
-							# apply or restore depending on mode
-							if self.enable_exclude_select:
-								self._apply_exclusion_mask_to_scene()
-							else:
-								self._restore_scene_scales()
+							# keep threshold filters active even when manual mode is off
+							self._sync_exclusion_to_scene()
 			except Exception:
 				pass
 			# clear selection state
@@ -536,12 +568,39 @@ class ViewerApp:
 			dpg.configure_item(self.btn_all_reset, enabled=self.enable_exclude_select)
 		except Exception:
 			pass
-		# when turning off, restore original scales so all MLPs are visible; keep state
-		if not self.enable_exclude_select:
-			self._restore_scene_scales()
-		else:
-			# turning on: apply current mask
-			self._apply_exclusion_mask_to_scene()
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_toggle_scale_filter(self, s, a):
+		self.enable_scale_filter = bool(a)
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_scale_threshold(self, s, a):
+		try:
+			self.scale_filter_threshold = float(np.clip(float(a), 0.0, 1.0))
+		except Exception:
+			return
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_scale_mode(self, s, a):
+		mode = str(a)
+		self.scale_filter_mode_small = (mode == "exclude < threshold")
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_toggle_sigma_filter(self, s, a):
+		self.enable_sigma_filter = bool(a)
+		self._sync_exclusion_to_scene()
+		self.needs_redraw = True
+
+	def _on_sigma_threshold(self, s, a):
+		try:
+			self.sigma_filter_threshold = max(0.0, float(a))
+		except Exception:
+			return
+		self._sync_exclusion_to_scene()
 		self.needs_redraw = True
 
 	def _invalidate_psnr(self):
@@ -557,26 +616,151 @@ class ViewerApp:
 
 	def _ensure_exclusion_state(self):
 		# initialize exclusion structures if needed
-		if self.excluded_mask is None:
-			try:
-				N = int(self.scene.positions.shape[0])
-			except Exception:
-				N = 0
+		try:
+			N = int(self.scene.positions.shape[0])
+		except Exception:
+			N = 0
+		if (self.excluded_mask is None) or (self.excluded_mask.numel() != N):
 			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
 			self._log_scales_backup = None
 
+	def _compute_relative_scales(self, base_log_scales_cpu: torch.Tensor) -> torch.Tensor | None:
+		"""
+		Compute relative primitive scales in [0, 1] using scene cuboid diagonal:
+		  scene_diag = ||max(positions)-min(positions)||_2
+		  rel_scale = primitive_scale / scene_diag
+		"""
+		try:
+			positions_cpu = self.scene.positions.detach().float().cpu()
+			if positions_cpu.numel() == 0:
+				self._scene_scale_diag = 1.0
+				return None
+			pos_min = positions_cpu.min(dim=0).values
+			pos_max = positions_cpu.max(dim=0).values
+			scene_diag = torch.norm(pos_max - pos_min).item()
+			if (not math.isfinite(scene_diag)) or scene_diag <= 1e-12:
+				scene_diag = 1.0
+			self._scene_scale_diag = float(scene_diag)
+
+			scales = torch.exp(base_log_scales_cpu.detach().float())
+			if scales.ndim == 2:
+				if scales.shape[1] == 1:
+					scale_1d = scales[:, 0]
+				else:
+					scale_1d = torch.max(scales, dim=1).values
+			else:
+				scale_1d = scales.reshape(-1)
+			rel = torch.clamp(scale_1d / float(scene_diag), 0.0, 1.0)
+			if rel.numel() > 0:
+				self._last_scale_rel_stats = (float(rel.min().item()), float(rel.max().item()))
+			return rel
+		except Exception:
+			return None
+
+	def _compute_sigma_proxy(self, n_primitives: int) -> torch.Tensor | None:
+		"""
+		Compute per-primitive sigma-like proxy for thresholding.
+		Priority:
+		  1) density-channel bias (softplus) from b3/lin3.bias
+		  2) alpha_accum fallback
+		"""
+		try:
+			raw = None
+			if hasattr(self.scene, "b3"):
+				b3 = self.scene.b3
+				if torch.is_tensor(b3) and b3.ndim == 2 and b3.shape[1] >= 4:
+					raw = b3[:, 3]
+			if raw is None and hasattr(self.scene, "mlps") and hasattr(self.scene.mlps, "lin3") and hasattr(self.scene.mlps.lin3, "bias"):
+				bias = self.scene.mlps.lin3.bias
+				if torch.is_tensor(bias) and bias.ndim == 2 and bias.shape[1] >= 4:
+					raw = bias[:, 3]
+			if raw is not None:
+				sigma = F.softplus(raw.detach().float()).cpu()
+				if sigma.numel() == n_primitives:
+					if sigma.numel() > 0:
+						self._last_sigma_stats = (float(sigma.min().item()), float(sigma.max().item()))
+					return sigma
+		except Exception:
+			pass
+		try:
+			if hasattr(self.scene, "alpha_accum") and torch.is_tensor(self.scene.alpha_accum):
+				sigma = self.scene.alpha_accum.detach().float().cpu()
+				if sigma.numel() == n_primitives:
+					if sigma.numel() > 0:
+						self._last_sigma_stats = (float(sigma.min().item()), float(sigma.max().item()))
+					return sigma
+		except Exception:
+			pass
+		return None
+
+	def _build_threshold_exclusion_mask(self, n_primitives: int, base_log_scales_cpu: torch.Tensor) -> torch.Tensor:
+		mask = torch.zeros(n_primitives, dtype=torch.bool)
+		if n_primitives == 0:
+			return mask
+		if self.enable_scale_filter:
+			rel = self._compute_relative_scales(base_log_scales_cpu)
+			if rel is not None and rel.numel() == n_primitives:
+				thr = float(np.clip(self.scale_filter_threshold, 0.0, 1.0))
+				if self.scale_filter_mode_small:
+					mask |= (rel < thr)
+				else:
+					mask |= (rel > thr)
+		if self.enable_sigma_filter:
+			sigma = self._compute_sigma_proxy(n_primitives)
+			if sigma is not None and sigma.numel() == n_primitives:
+				mask |= (sigma < float(self.sigma_filter_threshold))
+		return mask
+
+	def _update_filter_stats_ui(self, excluded_count: int | None = None, total_count: int | None = None):
+		if excluded_count is not None:
+			self._last_excluded_count = int(excluded_count)
+		if total_count is not None:
+			self._last_total_count = int(total_count)
+		try:
+			dpg.set_value(
+				self.filter_stats_text,
+				f"Filter stats: excluded={self._last_excluded_count}/{self._last_total_count}, "
+				f"scale_rel[min,max]=[{self._last_scale_rel_stats[0]:.3f}, {self._last_scale_rel_stats[1]:.3f}], "
+				f"sigma[min,max]=[{self._last_sigma_stats[0]:.3f}, {self._last_sigma_stats[1]:.3f}], "
+				f"scene_diag={self._scene_scale_diag:.4f}",
+			)
+		except Exception:
+			pass
+
+	def _sync_exclusion_to_scene(self):
+		manual_enabled = bool(self.enable_exclude_select)
+		auto_enabled = bool(self.enable_scale_filter or self.enable_sigma_filter)
+		if manual_enabled or auto_enabled:
+			self._apply_exclusion_mask_to_scene()
+		else:
+			self._restore_scene_scales()
+			try:
+				total = int(self.scene.positions.shape[0]) if self.scene is not None else 0
+			except Exception:
+				total = 0
+			self._update_filter_stats_ui(excluded_count=0, total_count=total)
+		self.needs_redraw = True
+
 	def _apply_exclusion_mask_to_scene(self):
-		# Apply the current excluded_mask by shrinking log_scales of excluded primitives
+		# Apply manual mask + threshold filter masks by shrinking log_scales.
 		self._ensure_exclusion_state()
-		if self.excluded_mask is None or self.excluded_mask.numel() == 0:
+		if self.excluded_mask is None:
 			return
 		try:
 			device = self.scene.log_scales.device
 			nls = self.scene.log_scales
 			if self._log_scales_backup is None or self._log_scales_backup.shape != nls.shape:
 				self._log_scales_backup = nls.detach().clone()
+			n_primitives = int(nls.shape[0])
+			base_log_scales_cpu = self._log_scales_backup.detach().float().cpu()
+			auto_mask = self._build_threshold_exclusion_mask(n_primitives, base_log_scales_cpu)
+			manual_mask = torch.zeros(n_primitives, dtype=torch.bool)
+			if self.enable_exclude_select and self.excluded_mask.numel() == n_primitives:
+				manual_mask = self.excluded_mask
+			combined = (manual_mask | auto_mask)
+			self._update_filter_stats_ui(excluded_count=int(combined.sum().item()), total_count=n_primitives)
 			new_vals = self._log_scales_backup.detach().clone().to(device)
-			mask_dev = self.excluded_mask.to(device)
+			mask_dev = combined.to(device)
 			if mask_dev.any():
 				new_vals[mask_dev, :] = -20.0  # effectively zero radius
 			with torch.no_grad():
@@ -601,7 +785,7 @@ class ViewerApp:
 		self._ensure_exclusion_state()
 		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
 			self.excluded_mask[:] = True
-			self._apply_exclusion_mask_to_scene()
+			self._sync_exclusion_to_scene()
 
 	def _on_all_reset(self):
 		# Include all primitives back
@@ -610,7 +794,7 @@ class ViewerApp:
 		self._ensure_exclusion_state()
 		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
 			self.excluded_mask[:] = False
-			self._apply_exclusion_mask_to_scene()
+			self._sync_exclusion_to_scene()
 
 	def _on_select_ckpt(self, s, a):
 		# a is the selected filename (basename)
@@ -884,7 +1068,7 @@ class ViewerApp:
 						best_d2 = d2; best_i = i
 				if best_i >= 0:
 					self.excluded_mask[best_i] = ~self.excluded_mask[best_i]
-					self._apply_exclusion_mask_to_scene()
+					self._sync_exclusion_to_scene()
 					self.needs_redraw = True
 		except Exception:
 			pass
@@ -1122,9 +1306,19 @@ class ViewerApp:
 			N = int(self.scene.positions.shape[0])
 			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
 			self._log_scales_backup = None
+			self._scene_scale_diag = 1.0
+			self._last_scale_rel_stats = (0.0, 0.0)
+			self._last_sigma_stats = (0.0, 0.0)
+			self._last_excluded_count = 0
+			self._last_total_count = N
 		except Exception:
 			self.excluded_mask = None
 			self._log_scales_backup = None
+			self._scene_scale_diag = 1.0
+			self._last_scale_rel_stats = (0.0, 0.0)
+			self._last_sigma_stats = (0.0, 0.0)
+			self._last_excluded_count = 0
+			self._last_total_count = 0
 		# best effort free
 		try:
 			del old
@@ -1132,6 +1326,7 @@ class ViewerApp:
 				torch.cuda.empty_cache()
 		except Exception:
 			pass
+		self._sync_exclusion_to_scene()
 
 	def run(self):
 		try:

@@ -1627,6 +1627,143 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   }
 }
 
+// Backward (tilecenter): feat_attr-only gradient accumulation without global hit-list buffers.
+__global__ void render_tiles_backward_featattr_tilecenter(
+    const float* __restrict__ rays_o,
+    const float* __restrict__ rays_d,
+    const float* __restrict__ pos,
+    const float* __restrict__ logs,
+    const int32_t* __restrict__ culled_prim_indices,
+    const int32_t* __restrict__ tile_offsets,
+    const float* __restrict__ freq_bands,
+    const float* __restrict__ attenuation,
+    const int F,
+    const float* __restrict__ W1, const float* __restrict__ b1,
+    const float* __restrict__ W2, const float* __restrict__ b2,
+    const float* __restrict__ W3, const float* __restrict__ b3,
+    const int N, const int H, const int IN,
+    const int Wimg, const int Himg, const int TW, const int TH,
+    const float thr,
+    const float* __restrict__ grad_out_feat,
+    const int Cfeat,
+    float* __restrict__ grad_feat_attr)
+{
+  const int tile_x = blockIdx.x;
+  const int tile_y = blockIdx.y;
+  const int tid = (int)threadIdx.x;
+  const int lx = tid % TW;
+  const int ly = tid / TW;
+  const int x = tile_x * TW + lx;
+  const int y = tile_y * TH + ly;
+  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const int pix = valid_pix ? (y * Wimg + x) : 0;
+
+  const int num_tiles_x = (Wimg + TW - 1) / TW;
+  const int tile_id = tile_y * num_tiles_x + tile_x;
+  const int32_t prim_start = tile_offsets[tile_id];
+  const int32_t prim_end = tile_offsets[tile_id + 1];
+  const int tile_len = (int)(prim_end - prim_start);
+  if (tile_len <= 0) return;
+
+  const float rox = valid_pix ? rays_o[pix*3+0] : 0.f;
+  const float roy = valid_pix ? rays_o[pix*3+1] : 0.f;
+  const float roz = valid_pix ? rays_o[pix*3+2] : 0.f;
+  const float rdx = valid_pix ? rays_d[pix*3+0] : 0.f;
+  const float rdy = valid_pix ? rays_d[pix*3+1] : 0.f;
+  const float rdz = valid_pix ? rays_d[pix*3+2] : 0.f;
+
+  const int cxp = min(tile_x * TW + (TW >> 1), Wimg - 1);
+  const int cyp = min(tile_y * TH + (TH >> 1), Himg - 1);
+  const int pix_c = cyp * Wimg + cxp;
+  const float crox = rays_o[pix_c*3+0];
+  const float croy = rays_o[pix_c*3+1];
+  const float croz = rays_o[pix_c*3+2];
+  const float crdx = rays_d[pix_c*3+0];
+  const float crdy = rays_d[pix_c*3+1];
+  const float crdz = rays_d[pix_c*3+2];
+
+  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int BLOCK_THREADS = 256;
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
+  __shared__ int s_pid[MAX_TILE_PRIMS];
+  using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
+  __shared__ typename BlockRadixSortT::TempStorage sort_storage;
+
+  const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
+  float keys[ITEMS_PER_THREAD];
+  int vals[ITEMS_PER_THREAD];
+#pragma unroll
+  for (int it = 0; it < ITEMS_PER_THREAD; ++it) {
+    const int i = tid * ITEMS_PER_THREAD + it;
+    if (i < load_n) {
+      const int p = (int)culled_prim_indices[prim_start + i];
+      vals[it] = p;
+      const float vx = pos[p*3+0] - crox;
+      const float vy = pos[p*3+1] - croy;
+      const float vz = pos[p*3+2] - croz;
+      const float tkey = fmaf(vx, crdx, fmaf(vy, crdy, vz * crdz));
+      keys[it] = (tkey > 0.f) ? tkey : 1e30f;
+    } else {
+      vals[it] = -1;
+      keys[it] = 1e30f;
+    }
+  }
+  BlockRadixSortT(sort_storage).Sort(keys, vals);
+  __syncthreads();
+#pragma unroll
+  for (int it = 0; it < ITEMS_PER_THREAD; ++it) {
+    const int i = tid * ITEMS_PER_THREAD + it;
+    s_pid[i] = vals[it];
+  }
+  __syncthreads();
+
+  float trans = 1.f;
+  auto process_prim = [&](int p) {
+    if (!valid_pix || trans < 1e-3f) return;
+    float t, dx, dy, dz, decay;
+    const float cx = pos[p*3+0];
+    const float cy = pos[p*3+1];
+    const float cz = pos[p*3+2];
+    const float lg = logs[p];
+    if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
+      const float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
+      const float* W1p = W1 + (size_t)p * H * IN;
+      const float* b1p = b1 + (size_t)p * H;
+      const float* W2p = W2 + (size_t)p * H * H;
+      const float* b2p = b2 + (size_t)p * H;
+      const float* W3p = W3 + (size_t)p * 4 * H;
+      const float* b3p = b3 + (size_t)p * 4;
+      float R, G, Bc, sigma_raw;
+      mlp_eval_rgb_sigma(freq_bands, attenuation, F, W1p, b1p, W2p, b2p, W3p, b3p, H, IN, v6, R, G, Bc, sigma_raw);
+      const float sigma = sigma_raw * decay;
+      const float alpha = 1.f - __expf(-sigma);
+      const float w = trans * alpha;
+      const float* gfeat_pix = grad_out_feat + (size_t)pix * Cfeat;
+      float* gfeat_prim = grad_feat_attr + (size_t)p * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+      }
+      trans *= (1.f - alpha);
+    }
+  };
+
+  for (int i = 0; i < load_n; ++i) {
+    const int p = s_pid[i];
+    if (p >= 0 && p < N) process_prim(p);
+    const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+    if (__syncthreads_or(active) == 0) break;
+  }
+  if (tile_len > load_n) {
+    for (int i = prim_start + load_n; i < prim_end; ++i) {
+      const int p = (int)culled_prim_indices[i];
+      if (p < 0 || p >= N) continue;
+      process_prim(p);
+      const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+      if (__syncthreads_or(active) == 0) break;
+    }
+  }
+}
+
 // Backward (tilecenter backprop-only, no atomics): profile compute cost without atomic accumulation.
 __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backprop_noatomic(
     const float* __restrict__ rays_o,
@@ -3126,6 +3263,330 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     return {rgb, alpha, t};
 }
 
+__global__ void render_tiles_kernel_tilecenter_order_with_feat(
+    const float* __restrict__ rays_o,
+    const float* __restrict__ rays_d,
+    const float* __restrict__ pos,
+    const float* __restrict__ logs,
+    const int32_t* __restrict__ culled_prim_indices,
+    const int32_t* __restrict__ tile_offsets,
+    const float* __restrict__ freq_bands,
+    const float* __restrict__ attenuation,
+    const int F,
+    const float* __restrict__ W1, const float* __restrict__ b1,
+    const float* __restrict__ W2, const float* __restrict__ b2,
+    const float* __restrict__ W3, const float* __restrict__ b3,
+    const float* __restrict__ feat_attr,
+    const int Cfeat,
+    const int N, const int H, const int IN,
+    const int Wimg, const int Himg, const int TW, const int TH,
+    const float thr,
+    float* __restrict__ out_rgb,
+    float* __restrict__ out_alpha,
+    float* __restrict__ out_feat)
+{
+  const int tile_x = blockIdx.x;
+  const int tile_y = blockIdx.y;
+  const int tid = (int)threadIdx.x;
+  const int lx = tid % TW;
+  const int ly = tid / TW;
+  const int x = tile_x * TW + lx;
+  const int y = tile_y * TH + ly;
+  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const int pix = valid_pix ? (y * Wimg + x) : 0;
+
+  const int num_tiles_x = (Wimg + TW - 1) / TW;
+  const int tile_id = tile_y * num_tiles_x + tile_x;
+
+  const float rox = valid_pix ? rays_o[pix*3+0] : 0.f;
+  const float roy = valid_pix ? rays_o[pix*3+1] : 0.f;
+  const float roz = valid_pix ? rays_o[pix*3+2] : 0.f;
+  const float rdx = valid_pix ? rays_d[pix*3+0] : 0.f;
+  const float rdy = valid_pix ? rays_d[pix*3+1] : 0.f;
+  const float rdz = valid_pix ? rays_d[pix*3+2] : 0.f;
+
+  const int cxp = min(tile_x * TW + (TW >> 1), Wimg - 1);
+  const int cyp = min(tile_y * TH + (TH >> 1), Himg - 1);
+  const int pix_c = cyp * Wimg + cxp;
+  const float crox = rays_o[pix_c*3+0];
+  const float croy = rays_o[pix_c*3+1];
+  const float croz = rays_o[pix_c*3+2];
+  const float crdx = rays_d[pix_c*3+0];
+  const float crdy = rays_d[pix_c*3+1];
+  const float crdz = rays_d[pix_c*3+2];
+
+  const int32_t prim_start = tile_offsets[tile_id];
+  const int32_t prim_end = tile_offsets[tile_id + 1];
+  const int tile_len = (int)(prim_end - prim_start);
+
+  float3 C = make_float3(0.f, 0.f, 0.f);
+  float trans = 1.f;
+
+  if (tile_len <= 0) {
+    if (valid_pix) {
+      out_rgb[pix*3+0] = 0.f;
+      out_rgb[pix*3+1] = 0.f;
+      out_rgb[pix*3+2] = 0.f;
+      out_alpha[pix] = 0.f;
+      for (int c = 0; c < Cfeat; ++c) out_feat[pix*Cfeat + c] = 0.f;
+    }
+    return;
+  }
+
+  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int BLOCK_THREADS = 256;
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
+  static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
+
+  __shared__ int s_pid[MAX_TILE_PRIMS];
+  using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
+  __shared__ typename BlockRadixSortT::TempStorage sort_storage;
+
+  const int num_threads = TW * TH;
+  const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
+
+  float keys[ITEMS_PER_THREAD];
+  int vals[ITEMS_PER_THREAD];
+#pragma unroll
+  for (int it = 0; it < ITEMS_PER_THREAD; ++it) {
+    const int i = tid * ITEMS_PER_THREAD + it;
+    if (i < load_n) {
+      const int p = (int)culled_prim_indices[prim_start + i];
+      vals[it] = p;
+      const float vx = pos[p*3+0] - crox;
+      const float vy = pos[p*3+1] - croy;
+      const float vz = pos[p*3+2] - croz;
+      const float tkey = fmaf(vx, crdx, fmaf(vy, crdy, vz * crdz));
+      keys[it] = (tkey > 0.f) ? tkey : 1e30f;
+    } else {
+      vals[it] = -1;
+      keys[it] = 1e30f;
+    }
+  }
+  BlockRadixSortT(sort_storage).Sort(keys, vals);
+  __syncthreads();
+#pragma unroll
+  for (int it = 0; it < ITEMS_PER_THREAD; ++it) {
+    const int i = tid * ITEMS_PER_THREAD + it;
+    s_pid[i] = vals[it];
+  }
+  __syncthreads();
+
+  extern __shared__ float sW[];
+  const int Hcap = H > 64 ? 64 : H;
+  const int W1n = Hcap * IN;
+  const int b1n = Hcap;
+  const int W2n = Hcap * Hcap;
+  const int b2n = Hcap;
+  const int W3n = 4 * Hcap;
+  const int b3n = 4;
+  float* sW1 = sW;
+  float* sb1 = sW1 + W1n;
+  float* sW2 = sb1 + b1n;
+  float* sb2 = sW2 + W2n;
+  float* sW3 = sb2 + b2n;
+  float* sb3 = sW3 + W3n;
+  const int total_floats = W1n + b1n + W2n + b2n + W3n + b3n;
+
+  auto load_weights = [&](int p) {
+    const float* W1p = W1 + (size_t)p * H * IN;
+    const float* b1p = b1 + (size_t)p * H;
+    const float* W2p = W2 + (size_t)p * H * H;
+    const float* b2p = b2 + (size_t)p * H;
+    const float* W3p = W3 + (size_t)p * 4 * H;
+    const float* b3p = b3 + (size_t)p * 4;
+
+    for (int idx = tid; idx < total_floats; idx += num_threads) {
+      int off = idx;
+      if (off < W1n) { sW1[off] = W1p[off]; continue; }
+      off -= W1n;
+      if (off < b1n) { sb1[off] = b1p[off]; continue; }
+      off -= b1n;
+      if (off < W2n) { sW2[off] = W2p[off]; continue; }
+      off -= W2n;
+      if (off < b2n) { sb2[off] = b2p[off]; continue; }
+      off -= b2n;
+      if (off < W3n) { sW3[off] = W3p[off]; continue; }
+      off -= W3n;
+      if (off < b3n) { sb3[off] = b3p[off]; }
+    }
+    __syncthreads();
+  };
+
+  auto eval_and_blend = [&](int p) {
+    if (valid_pix && (trans >= 1e-3f)) {
+      float t, dx, dy, dz, decay;
+      const float cx = pos[p*3+0];
+      const float cy = pos[p*3+1];
+      const float cz = pos[p*3+2];
+      const float lg = logs[p];
+      if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
+        float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
+
+        float h1[64];
+        for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = sb1[h_idx];
+
+        const int cos_offset = IN / 2;
+        for (int c = 0; c < 6; ++c) {
+          for (int f = 0; f < F; ++f) {
+            const float fb = freq_bands[f];
+            const float att = attenuation[f];
+            const float xproj = v6[c] * fb * att;
+            const int j = c * F + f;
+            const float s = __sinf(xproj);
+            const float co = __cosf(xproj);
+            for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
+              const float* Wi = sW1 + (size_t)h_idx * IN;
+              h1[h_idx] = fmaf(Wi[j], s, h1[h_idx]);
+              h1[h_idx] = fmaf(Wi[j + cos_offset], co, h1[h_idx]);
+            }
+          }
+        }
+        for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
+
+        float h2[64];
+        for (int o = 0; o < Hcap; ++o) {
+          float acc = sb2[o];
+          const float* W2row = sW2 + (size_t)o * Hcap;
+          for (int h_idx = 0; h_idx < Hcap; ++h_idx) acc = fmaf(W2row[h_idx], h1[h_idx], acc);
+          h2[o] = acc > 0.f ? acc : 0.f;
+        }
+
+        float o3 = sb3[0], o4 = sb3[1], o5 = sb3[2], o6 = sb3[3];
+        for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
+          const float hi = h2[h_idx];
+          o3 = fmaf(sW3[0*Hcap + h_idx], hi, o3);
+          o4 = fmaf(sW3[1*Hcap + h_idx], hi, o4);
+          o5 = fmaf(sW3[2*Hcap + h_idx], hi, o5);
+          o6 = fmaf(sW3[3*Hcap + h_idx], hi, o6);
+        }
+
+        const float sigma_raw = fast_softplus(o6);
+        const float sigma = sigma_raw * decay;
+        const float alpha = 1.f - __expf(-sigma);
+        const float w = trans * alpha;
+
+        const float R = fast_sigmoid(o3);
+        const float G = fast_sigmoid(o4);
+        const float Bc = fast_sigmoid(o5);
+        C.x = fmaf(w, R, C.x);
+        C.y = fmaf(w, G, C.y);
+        C.z = fmaf(w, Bc, C.z);
+        float* dst_feat = out_feat + (size_t)pix * Cfeat;
+        const float* src_feat = feat_attr + (size_t)p * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+        trans *= (1.f - alpha);
+      }
+    }
+    __syncthreads();
+  };
+
+  if (valid_pix) {
+    for (int c = 0; c < Cfeat; ++c) out_feat[pix*Cfeat + c] = 0.f;
+  }
+  __syncthreads();
+
+  for (int i = 0; i < load_n; ++i) {
+    const int p = s_pid[i];
+    if (p < 0 || p >= N) continue;
+    load_weights(p);
+    eval_and_blend(p);
+    const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+    if (__syncthreads_or(active) == 0) break;
+  }
+  if (tile_len > load_n) {
+    for (int i = prim_start + load_n; i < prim_end; ++i) {
+      const int p = (int)culled_prim_indices[i];
+      if (p < 0 || p >= N) continue;
+      load_weights(p);
+      eval_and_blend(p);
+      const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
+      if (__syncthreads_or(active) == 0) break;
+    }
+  }
+
+  if (valid_pix) {
+    out_rgb[pix*3+0] = C.x;
+    out_rgb[pix*3+1] = C.y;
+    out_rgb[pix*3+2] = C.z;
+    out_alpha[pix]   = 1.f - trans;
+  }
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_with_feat_wrapper(
+    torch::Tensor rays_o,
+    torch::Tensor rays_d,
+    torch::Tensor positions,
+    torch::Tensor log_scales,
+    torch::Tensor culled_prim_indices,
+    torch::Tensor tile_offsets,
+    torch::Tensor freq_bands,
+    torch::Tensor attenuation,
+    torch::Tensor W1, torch::Tensor b1,
+    torch::Tensor W2, torch::Tensor b2,
+    torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor feat_attr,
+    int64_t Wimg, int64_t Himg,
+    int64_t TW, int64_t TH,
+    double threshold)
+{
+    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+    TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+    TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+    TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==1);
+    TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+    TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+    TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+    TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && feat_attr.dim()==2);
+
+    const int64_t B = rays_o.size(0);
+    TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+
+    const int64_t N = positions.size(0);
+    const int64_t Hh = W2.size(1);
+    const int64_t IN = W1.size(2);
+    const int64_t F = freq_bands.size(0);
+    TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+    TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
+    const int64_t Cfeat = feat_attr.size(1);
+    TORCH_CHECK(Cfeat > 0, "feat_attr second dimension must be positive");
+    TORCH_CHECK(Cfeat <= 512, "feat_attr second dimension must be <= 512");
+
+    auto opts_f = rays_o.options().dtype(at::kFloat);
+    auto rgb   = torch::zeros({B, 3}, opts_f);
+    auto alpha = torch::zeros({B, 1}, opts_f);
+    auto feat  = torch::zeros({B, Cfeat}, opts_f);
+
+    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+    const int Hcap = (int)(Hh > 64 ? 64 : Hh);
+    const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
+    const size_t shared_bytes = (size_t)shared_floats * sizeof(float);
+
+    render_tiles_kernel_tilecenter_order_with_feat<<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        W1.data_ptr<float>(), b1.data_ptr<float>(),
+        W2.data_ptr<float>(), b2.data_ptr<float>(),
+        W3.data_ptr<float>(), b3.data_ptr<float>(),
+        feat_attr.data_ptr<float>(), (int)Cfeat,
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        rgb.data_ptr<float>(), alpha.data_ptr<float>(), feat.data_ptr<float>());
+    AT_CUDA_CHECK(cudaGetLastError());
+    return {rgb, alpha, feat};
+}
+
 
 
 // Backward count wrappers
@@ -3424,6 +3885,73 @@ render_tiles_backward_emit_tilecenter_wrapper(
     return {out_prim_id, out_x6, out_grad_rgb, out_grad_sigma_raw, grad_positions, grad_log_scales};
 }
 
+torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
+    torch::Tensor rays_o,
+    torch::Tensor rays_d,
+    torch::Tensor positions,
+    torch::Tensor log_scales,
+    torch::Tensor culled_prim_indices,
+    torch::Tensor tile_offsets,
+    torch::Tensor freq_bands,
+    torch::Tensor attenuation,
+    torch::Tensor W1, torch::Tensor b1,
+    torch::Tensor W2, torch::Tensor b2,
+    torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor grad_out_feat,
+    int64_t Wimg, int64_t Himg,
+    int64_t TW, int64_t TH,
+    double threshold)
+{
+    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+    TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+    TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+    TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==1);
+    TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+    TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+    TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+    TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(grad_out_feat.is_cuda() && grad_out_feat.dtype()==at::kFloat && grad_out_feat.dim()==2);
+
+    const int64_t B = rays_o.size(0);
+    TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    TORCH_CHECK(grad_out_feat.size(0) == B, "grad_out_feat must have shape (B, Cfeat)");
+
+    const int64_t N = positions.size(0);
+    const int64_t Hh = W2.size(1);
+    const int64_t IN = W1.size(2);
+    const int64_t F = freq_bands.size(0);
+    TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+    const int64_t Cfeat = grad_out_feat.size(1);
+    TORCH_CHECK(Cfeat > 0, "grad_out_feat second dimension must be positive");
+    TORCH_CHECK(Cfeat <= 512, "grad_out_feat second dimension must be <= 512");
+
+    auto grad_feat_attr = torch::zeros({N, Cfeat}, rays_o.options().dtype(at::kFloat));
+    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+    render_tiles_backward_featattr_tilecenter<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        W1.data_ptr<float>(), b1.data_ptr<float>(),
+        W2.data_ptr<float>(), b2.data_ptr<float>(),
+        W3.data_ptr<float>(), b3.data_ptr<float>(),
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        grad_out_feat.data_ptr<float>(),
+        (int)Cfeat,
+        grad_feat_attr.data_ptr<float>());
+    AT_CUDA_CHECK(cudaGetLastError());
+    return grad_feat_attr;
+}
+
 // Full backward (tilecenter) wrapper: CUDA computes MLP grads directly
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_tilecenter_full_wrapper(
@@ -3603,10 +4131,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("render_tiles_forward", &render_tiles_forward_wrapper, "Tile splatting forward (per-pixel sort, no autograd)");
   m.def("render_tiles_forward_tilecenter", &render_tiles_forward_tilecenter_wrapper, "Tile splatting forward (tile-center order, no autograd)");
   m.def("render_tiles_forward_tilecenter_with_t", &render_tiles_forward_tilecenter_with_t_wrapper, "Tile splatting forward (tile-center order, no autograd, with expected depth t)");
+  m.def("render_tiles_forward_tilecenter_with_feat", &render_tiles_forward_tilecenter_with_feat_wrapper, "Tile splatting forward (tile-center order, no autograd, with rendered feature map)");
   m.def("render_tiles_backward_count_per_pixel", &render_tiles_backward_count_per_pixel_wrapper, "Tile splatting backward count (per-pixel)");
   m.def("render_tiles_backward_count_tilecenter", &render_tiles_backward_count_tilecenter_wrapper, "Tile splatting backward count (tilecenter)");
   m.def("render_tiles_backward_emit_per_pixel", &render_tiles_backward_emit_per_pixel_wrapper, "Tile splatting backward emit (per-pixel)");
   m.def("render_tiles_backward_emit_tilecenter", &render_tiles_backward_emit_tilecenter_wrapper, "Tile splatting backward emit (tilecenter)");
+  m.def("render_tiles_backward_featattr_tilecenter", &render_tiles_backward_featattr_tilecenter_wrapper, "Tile splatting backward feat_attr-only (tilecenter)");
   m.def("render_tiles_backward_tilecenter_full", &render_tiles_backward_tilecenter_full_wrapper, "Tile splatting backward full (tilecenter, MLP grads in CUDA)");
   m.def("render_tiles_backward_tilecenter_traversal", &render_tiles_backward_tilecenter_traversal_wrapper, "Tile splatting backward traversal-only (tilecenter profiling)");
   m.def("render_tiles_backward_tilecenter_backprop_noatomic", &render_tiles_backward_tilecenter_backprop_noatomic_wrapper, "Tile splatting backward backprop-only (tilecenter profiling, no atomics)");

@@ -15,8 +15,8 @@ def _strip_prefixes(state_dict: dict) -> dict:
     return new_sd
 
 
-def infer_model_dims(state_dict: dict) -> tuple[int, int, int]:
-    # returns (num_primitives, hidden_dim, num_frequencies)
+def infer_model_dims(state_dict: dict) -> tuple[int, int, int, int]:
+    # returns (num_primitives, hidden_dim, num_frequencies, feature_dim_low)
     if "positions" in state_dict:
         num_primitives = state_dict["positions"].shape[0]
     elif "mlps.lin1.weight" in state_dict:
@@ -47,7 +47,12 @@ def infer_model_dims(state_dict: dict) -> tuple[int, int, int]:
     # encoded_dim = 6 * num_frequencies * 2
     assert denc % (6 * 2) == 0, "Encoded dim not divisible by 12"
     num_f = denc // 12
-    return num_primitives, h, num_f
+    feature_dim_low = 0
+    if "feat_attr" in state_dict:
+        feat_attr = state_dict["feat_attr"]
+        if torch.is_tensor(feat_attr) and feat_attr.ndim == 2:
+            feature_dim_low = int(feat_attr.shape[1])
+    return num_primitives, h, num_f, feature_dim_low
 
 
 def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | None = None):
@@ -107,6 +112,8 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
     SceneCls = SceneImpl
 
     raw_sd = torch.load(ckpt_path, map_location="cpu")
+    if isinstance(raw_sd, dict) and "scene_state_dict" in raw_sd:
+        raw_sd = raw_sd["scene_state_dict"]
     sd = _strip_prefixes(raw_sd)
 
     # Remap legacy MLP weights to tile engine parameter names if needed
@@ -127,20 +134,23 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
         out["b3"] = sd_in["mlps.lin3.bias"]
         return out
 
-    N, hidden_dim, num_f = infer_model_dims(sd)
+    N, hidden_dim, num_f, feature_dim_low = infer_model_dims(sd)
 
-    print(f"[viewer] N: {N}, hidden_dim: {hidden_dim}, num_f: {num_f}")
+    print(f"[viewer] N: {N}, hidden_dim: {hidden_dim}, num_f: {num_f}, feature_dim_low: {feature_dim_low}")
 
     # Try to preserve model's topk if present via buffer heuristics (none saved), fallback to default 128
     # scene = SceneCls(
-    scene = SceneCls(
+    scene_kwargs = dict(
         num_primitives=N,
         hidden_dim=hidden_dim,
         pe_frequencies=num_f,
         # topk=N,
         # topk=64,
         use_integrated_pe=True,
-    ).to(device)
+    )
+    if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA":
+        scene_kwargs["feature_dim_low"] = int(feature_dim_low)
+    scene = SceneCls(**scene_kwargs).to(device)
 
     # Apply remap for tile engine to avoid unexpected/missing keys
     if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA" or SceneCls.__name__ == "NeuralPrimitiveSceneSplatTileCUDA":
@@ -157,5 +167,4 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
 
     scene.eval()
     return scene
-
 
