@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from multiprocessing.util import info
+import inspect
+import math
 import os
 import re
 import uuid
@@ -16,11 +18,12 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import StepLR
 from vmodel import NeuralPrimitiveScene
 # from vmodel import NeuralPrimitiveScene
 from mip360_loader import mip360Dataset
 from feature_decoder import FeatureUpsampleDecoder
+from pruning_densification import densify_and_prune
+from utils.loss_utils import ssim
 
 
 def _barf_frequency_weights(alpha: float, num_frequencies: int, device: torch.device | str) -> torch.Tensor:
@@ -48,9 +51,39 @@ def _build_mock_feature_projection(out_dim: int, device: torch.device | str) -> 
     return proj.to(device=device)
 
 
+def _filter_kwargs_for_callable(func, kwargs: dict) -> dict:
+    sig = inspect.signature(func)
+    return {k: v for k, v in kwargs.items() if k in sig.parameters}
+
+
 def zero_grads_for_ids(scene: nn.Module, fixed_ids: torch.Tensor):
-    # Densify/prune is disabled in this branch; keep compatibility with legacy call sites.
-    return
+    if fixed_ids.numel() == 0:
+        return
+    fixed_ids = fixed_ids.to(scene.positions.device, dtype=torch.long)
+    if fixed_ids.numel() == 0:
+        return
+    if int(fixed_ids.max().item()) >= int(scene.positions.shape[0]):
+        return
+    grad_tensors = [
+        getattr(scene, "positions", None),
+        getattr(scene, "log_scales", None),
+        getattr(scene, "quats", None),
+        getattr(scene, "W1", None),
+        getattr(scene, "b1", None),
+        getattr(scene, "W2", None),
+        getattr(scene, "b2", None),
+        getattr(scene, "W3", None),
+        getattr(scene, "b3", None),
+        getattr(scene, "feat_attr", None),
+    ]
+    for p in grad_tensors:
+        if not isinstance(p, torch.nn.Parameter):
+            continue
+        if p.grad is None:
+            continue
+        if p.grad.ndim == 0 or p.grad.shape[0] <= int(fixed_ids.max().item()):
+            continue
+        p.grad[fixed_ids] = 0
 
 
 def _extract_epoch_from_path(path: str) -> int:
@@ -465,6 +498,7 @@ def train_scene_llff(
     lr=1e-3,
     device='cuda',
     initial_num_primitives=1024,
+    min_points: int = 35,
     engine: str = "vmodel",
     tile_order: str = "per_pixel",
     resume_ckpt: str | None = None,
@@ -484,7 +518,17 @@ def train_scene_llff(
     feature_decoder_hidden_dim: int = 128,
     feature_lowdim_divisor: int = 4,
     feature_mock_from_rgb: bool = False,
+    lambda_dssim: float = 0.1,
+    late_cosine_start: int = 80000,
+    late_cosine_total_steps: int = 110000,
+    late_cosine_min_mlp: float = 1e-2,
+    late_cosine_min_scale: float = 0.2,
+    late_cosine_min_position: float = 0.3,
+    late_cosine_min_extra: float = 0.2,
     disable_densify_prune: bool = True,
+    densify_prune_interval: int = 5000,
+    densify_prune_warmup_steps: int = 2000,
+    densify_prune_num_views: int = 20,
     preload_features: bool = False,
     feature_cache_size: int = 16,
     ray_cache_size: int = 8,
@@ -608,12 +652,16 @@ def train_scene_llff(
         # This renderer consumes full-frame rays (B == W*H) and view/proj matrices.
         from cumodel import NeuralPrimitiveSceneTileCUDA
         init_positions = None if resume_ckpt else dataset.positions
+        scene_kwargs = {
+            "num_primitives": initial_num_primitives,
+            "hidden_dim": 32,
+            "pe_frequencies": 6,
+            "initial_positions": init_positions,
+            "feature_dim_low": feature_dim_low,
+            "min_points": int(min_points),
+        }
         scene = NeuralPrimitiveSceneTileCUDA(
-            num_primitives=initial_num_primitives,
-            hidden_dim=32,
-            pe_frequencies=6,
-            initial_positions=init_positions,
-            feature_dim_low=feature_dim_low,
+            **_filter_kwargs_for_callable(NeuralPrimitiveSceneTileCUDA.__init__, scene_kwargs)
         ).to(device)
         # ensure tile order mode for this run
         os.environ["MLPSP_TILE_ORDER"] = str(tile_order)
@@ -656,11 +704,13 @@ def train_scene_llff(
         mlp_params = list(scene.mlps.parameters())
 
     param_groups = [
-        {"params": mlp_params},  # 默认 1e-3
-        {"params": scene.log_scales, "lr": 1e-2},
-        {"params": scene.positions, "lr": 1e-4},
+        {"params": mlp_params, "lr": float(lr)},
+        {"params": [scene.log_scales], "lr": 1e-2},
+        {"params": [scene.positions], "lr": 1e-4},
         #{"params": scene.rotations, "lr": 1e-2},
     ]
+    if hasattr(scene, "quats") and isinstance(getattr(scene, "quats"), torch.nn.Parameter):
+        param_groups.append({"params": [scene.quats], "lr": float(lr)})
     if use_feature_metric:
         if getattr(scene, "feat_attr", None) is None:
             raise RuntimeError("Feature training requested but scene has no feat_attr.")
@@ -668,11 +718,45 @@ def train_scene_llff(
         if feature_decoder is not None:
             param_groups.append({"params": feature_decoder.parameters(), "lr": float(lr)})
     optimizer = torch.optim.Adam(param_groups, lr=float(lr))
-    base_center_lr = float(optimizer.param_groups[2]["lr"])
+    base_group_lrs = [float(g["lr"]) for g in optimizer.param_groups]
+    base_center_lr = float(base_group_lrs[2])
+    lambda_dssim = float(max(0.0, min(1.0, lambda_dssim)))
+
+    late_cosine_start = int(max(0, late_cosine_start))
+    late_cosine_total_steps = int(max(late_cosine_start + 1, late_cosine_total_steps))
+    late_cosine_min_mlp = float(max(0.0, min(1.0, late_cosine_min_mlp)))
+    late_cosine_min_scale = float(max(0.0, min(1.0, late_cosine_min_scale)))
+    late_cosine_min_position = float(max(0.0, min(1.0, late_cosine_min_position)))
+    late_cosine_min_extra = float(max(0.0, min(1.0, late_cosine_min_extra)))
+    group_min_mults = []
+    for gi in range(len(base_group_lrs)):
+        if gi == 0:
+            group_min_mults.append(late_cosine_min_mlp)
+        elif gi == 1:
+            group_min_mults.append(late_cosine_min_scale)
+        elif gi == 2:
+            group_min_mults.append(late_cosine_min_position)
+        else:
+            group_min_mults.append(late_cosine_min_extra)
+
+    def _late_cosine_multiplier(step: int, min_mult: float) -> float:
+        if step < late_cosine_start:
+            return 1.0
+        t = float(step - late_cosine_start) / float(max(1, late_cosine_total_steps - late_cosine_start))
+        t = max(0.0, min(1.0, t))
+        return float(min_mult + 0.5 * (1.0 - min_mult) * (1.0 + math.cos(math.pi * t)))
+
+    def _apply_late_cosine_lrs(step: int):
+        for gi, group in enumerate(optimizer.param_groups):
+            group["lr"] = float(base_group_lrs[gi]) * _late_cosine_multiplier(step, group_min_mults[gi])
+
     center_lr_start_factor = float(max(1e-6, min(1.0, center_lr_start_factor)))
     pe_ramp_start = int(max(0, pe_ramp_start))
     pe_ramp_steps = int(max(1, pe_ramp_steps))
     center_lr_warmup_steps = int(max(1, center_lr_warmup_steps))
+    densify_prune_interval = int(max(1, densify_prune_interval))
+    densify_prune_warmup_steps = int(max(0, densify_prune_warmup_steps))
+    densify_prune_num_views = int(max(1, densify_prune_num_views))
 
     if enable_pe_ramp:
         print(
@@ -684,9 +768,10 @@ def train_scene_llff(
             f"[Center LR Warmup] Enabled: base_lr={base_center_lr:.6g}, "
             f"start_factor={center_lr_start_factor:.4f}, steps={center_lr_warmup_steps}"
         )
-
-
-    #scheduler = StepLR(optimizer, step_size=1000, gamma=0.8)
+    print(
+        f"[LR] Late-cosine enabled: start={late_cosine_start}, total_steps={late_cosine_total_steps}, "
+        f"group_min_mults={group_min_mults}"
+    )
 
     start_epoch = 0
     optimizer_resumed = False
@@ -731,6 +816,7 @@ def train_scene_llff(
                 "batch_size": batch_size,
                 "lr": lr,
                 "num_primitives": initial_num_primitives,
+                "min_points": int(min_points),
                 "hidden_dim": 32,
                 "pe_frequencies": 6,
                 "num_layers": 2,   # 当前是单隐藏层，如果以后改成两层可以记录成2
@@ -751,7 +837,17 @@ def train_scene_llff(
                 "feature_decoder_enabled": bool(use_feature_decoder),
                 "feature_decoder_hidden_dim": int(feature_decoder_hidden_dim),
                 "feature_loss_weight": float(feature_loss_weight),
+                "lambda_dssim": float(lambda_dssim),
+                "late_cosine_start": int(late_cosine_start),
+                "late_cosine_total_steps": int(late_cosine_total_steps),
+                "late_cosine_min_mlp": float(late_cosine_min_mlp),
+                "late_cosine_min_scale": float(late_cosine_min_scale),
+                "late_cosine_min_position": float(late_cosine_min_position),
+                "late_cosine_min_extra": float(late_cosine_min_extra),
                 "disable_densify_prune": bool(disable_densify_prune),
+                "densify_prune_interval": int(densify_prune_interval),
+                "densify_prune_warmup_steps": int(densify_prune_warmup_steps),
+                "densify_prune_num_views": int(densify_prune_num_views),
                 "preload_features": bool(preload_features),
                 "feature_cache_size": int(feature_cache_size),
                 "ray_cache_size": int(ray_cache_size),
@@ -814,8 +910,7 @@ def train_scene_llff(
     timing_enabled = os.environ.get("MLPSP_TIMING", "0") == "1"
     timing_every = int(os.environ.get("MLPSP_TIMING_EVERY", "50"))
     did_densify = False
-    if not bool(disable_densify_prune):
-        raise ValueError("This training path enforces densify/prune disabled for controlled experiments.")
+    enable_densify_prune = not bool(disable_densify_prune)
     mock_feature_proj = None
     if use_feature_metric and use_mock_feature:
         mock_feature_proj = _build_mock_feature_projection(feature_dim_gt, device=device)
@@ -829,6 +924,9 @@ def train_scene_llff(
 
         bg_color = torch.rand(3, device=device)
         feat_gt_hwc = None
+
+        # (0) Late-cosine LR schedule.
+        _apply_late_cosine_lrs(epoch)
 
         # (1) BARF-style PE frequency ramp.
         if enable_pe_ramp and hasattr(scene, "encoder") and hasattr(scene.encoder, "num_frequencies"):
@@ -844,7 +942,7 @@ def train_scene_llff(
         if enable_center_lr_warmup:
             warmup_progress = min(1.0, float(epoch) / float(center_lr_warmup_steps))
             lr_scale = center_lr_start_factor + (1.0 - center_lr_start_factor) * warmup_progress
-            optimizer.param_groups[2]["lr"] = base_center_lr * lr_scale
+            optimizer.param_groups[2]["lr"] = float(optimizer.param_groups[2]["lr"]) * lr_scale
 
         if engine == "tile_cuda":
             use_mosaic_step = use_tile_mosaic and (epoch >= tile_mosaic_warmup_steps)
@@ -1002,7 +1100,16 @@ def train_scene_llff(
                 with _nvtx_range("train/forward_vmodel"):
                     pred = scene(rays_o_batch, rays_d_batch, score_threshold=1e-3, bg_color=bg_color)    # 2. Forward pass
                     feat_low = None
-            loss_rgb = F.mse_loss(pred, rgbs_batch)         # 3. Compute loss (MSE)
+            # 3DGS-style RGB reconstruction: (1-lambda)*L1 + lambda*(1-SSIM).
+            loss_l1 = F.l1_loss(pred, rgbs_batch)
+            if engine == "tile_cuda":
+                pred_img = pred.view(Himg, Wimg, 3).permute(2, 0, 1).unsqueeze(0)
+                gt_img = rgbs_batch.view(Himg, Wimg, 3).permute(2, 0, 1).unsqueeze(0)
+                loss_ssim = 1.0 - ssim(pred_img, gt_img)
+                loss_rgb = (1.0 - lambda_dssim) * loss_l1 + lambda_dssim * loss_ssim
+            else:
+                loss_ssim = None
+                loss_rgb = loss_l1
             loss = loss_rgb
             loss_feat = None
             if use_feature_metric:
@@ -1087,9 +1194,15 @@ def train_scene_llff(
             loss_accum.zero_()
             loss_count = 0
             if USE_WANDB:   # log to Weights & Biases
-                metrics = {"avg_loss": avg_loss_scalar, "epoch": epoch + 1}
+                metrics = {
+                    "avg_loss": avg_loss_scalar,
+                    "epoch": epoch + 1,
+                    "loss_rgb": float(loss_rgb.item()),
+                    "loss_l1": float(loss_l1.item()),
+                }
+                if loss_ssim is not None:
+                    metrics["loss_ssim"] = float(loss_ssim.item())
                 if use_feature_metric:
-                    metrics["loss_rgb"] = float(loss_rgb.item())
                     if loss_feat is not None:
                         metrics["loss_feat"] = float(loss_feat.item())
                 wandb.log(metrics)
@@ -1097,111 +1210,77 @@ def train_scene_llff(
                 loss_accum.zero_()
                 loss_count = 0
 
-        if False and (engine == "tile_cuda") and (epoch % 5000 == 0) and (epoch > 0):
-            """
-            tile_results = sample_worst_tiles_l1(
-                scene, dataset,
-                k_images=100,
-                m_tiles=20,
-                tile_size=32,
-                score_threshold=1e-3,
-                bg_color=torch.zeros(3, device="cuda"),
-                seed=0,
-            )
-
-            sampled_ids = [r["img_idx"] for r in tile_results]
-            print(sampled_ids)
-
-            torch.save(tile_results, os.path.join(output_dir, "tile_results.pt"))
-
-            #print(f"[Tile Results] {tile_results}")
-            pointcloud_xyz = tiles_to_points_from_tmap(
-                scene, dataset,
-                tile_results,
-                tile_size=32,
-                score_threshold=1e-3,
-                bg_color=torch.zeros(3, device="cuda"),
-                alpha_min=1e-10,
-            )
-
-            # 你已有的 densify 接口直接吃 (M,3)
-            stats = densify_tilecuda_from_pointcloud_random(scene, pointcloud_xyz, DENSIFY_K)
-
-            
-            
-            stats = densify_tilecuda_stage1_from_worst_tiles(
-            scene, dataset,
-            k_images=100, m_tiles=20, tile_size=32,
+        run_densify_prune = (
+            enable_densify_prune
+            and engine == "tile_cuda"
+            and (epoch + 1) >= densify_prune_warmup_steps
+            and ((epoch + 1) % densify_prune_interval == 0)
         )
-
-            _save_scene_with_optional_decoder(
-                os.path.join(output_dir, "after_densification.pt"), scene, feature_decoder
+        if run_densify_prune:
+            has_stat_api = (
+                hasattr(scene, "reset_w_stats")
+                and hasattr(scene, "render_rgb_alpha_no_grad")
+                and hasattr(scene, "stat_sum_w")
+                and hasattr(scene, "stat_hits")
+                and hasattr(scene, "stat_contrib_count")
+                and hasattr(scene, "stat_sum_werr")
+                and hasattr(scene, "quats")
             )
-            did_densify = True
-            print(f"[densify] {stats}")
+            if not has_stat_api:
+                print(
+                    "[densify/prune] Requested but skipped: scene is missing "
+                    "stat buffers or quaternion parameters required by densify_and_prune()."
+                )
+            else:
+                was_training = scene.training
+                scene.eval()
+                scene.reset_w_stats()
+                view_count = min(int(densify_prune_num_views), len(dataset))
+                view_ids = torch.randperm(len(dataset))[:view_count].tolist()
+                with torch.no_grad():
+                    for img_idx in view_ids:
+                        sample = dataset[int(img_idx)]
+                        if isinstance(sample, (tuple, list)) and len(sample) == 5:
+                            rays_o_hw, rays_d_hw, img_hw3, _feat_hwc, pose = sample
+                        else:
+                            rays_o_hw, rays_d_hw, img_hw3, pose = sample
+                        Himg_stat, Wimg_stat = int(img_hw3.shape[0]), int(img_hw3.shape[1])
+                        scene.set_image_size(Wimg_stat, Himg_stat)
+                        rays_o_stat = rays_o_hw.reshape(-1, 3).to(device, non_blocking=True)
+                        rays_d_stat = rays_d_hw.reshape(-1, 3).to(device, non_blocking=True)
+                        gt_rgb_stat = img_hw3.reshape(-1, 3).to(device, non_blocking=True)
+                        view_matrix_stat = _c2w_to_view_matrix(pose, device=device)
+                        proj_matrix_stat = _build_projection_from_focal(dataset.focal, Wimg_stat, Himg_stat, device=device)
+                        scene.render_rgb_alpha_no_grad(
+                            rays_o_stat,
+                            rays_d_stat,
+                            score_threshold=1e-3,
+                            bg_color=torch.zeros(3, device=device),
+                            view_matrix=view_matrix_stat,
+                            proj_matrix=proj_matrix_stat,
+                            collect_w_stats=True,
+                            gt_rgb=gt_rgb_stat,
+                        )
 
-            # 跑通优先：重建 optimizer，让新增 Parameter 被优化
-            optimizer = torch.optim.Adam([
-                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
-                {'params': [scene.log_scales], 'lr': 1e-2},
-                {'params': [scene.positions], 'lr': 1e-4},
-            ])
-            print("[densify] optimizer rebuilt.")
-            """
-
-            densify_scores = compute_multiview_densify_scores(
-                scene, dataset,
-                k_images=20,
-                r_threshold=0.10,
-                cover_mult=3.716,
-                chunk_prims=128,
-                seed=0,
-            )
-
-            # 例如：选 score > densify_thr 的 primitives 作为 densify target（覆盖多视角高误差区域）
-            densify_thr = 500.0
-            densify_ids = torch.nonzero(densify_scores > densify_thr, as_tuple=False).squeeze(-1)
-
-            # prune_scores = compute_multiview_prune_scores(
-            #     scene, dataset,
-            #     k_images=20,
-            #     r_threshold=0.10,
-            #     cover_mult=3.716,
-            #     chunk_prims=128,
-            #     seed=0,
-            # )
-            prune_ids, prune_info = compute_prune_ids_from_scale_sigma(
-                scene,
-                scale_rel_min=0.03,
-                sigma_max=0.15,
-                return_details=True,
-            )
-            # prune_thr = 0.9
-            # prune_ids = torch.nonzero(prune_scores > float(prune_thr), as_tuple=False).squeeze(-1)
-            print("[prune] scale/sigma criteria:", prune_info)
-            densify_prune_tilecuda_and_rebuild_optimizeroptimizer, info, fixed_ids = densify_prune_tilecuda_and_rebuild_optimizer(
-                scene, optimizer,
-                densify_ids=densify_ids,   # 旧空间 ids
-                prune_ids=prune_ids,       # 旧空间 ids（高分删）
-                init_std=0.01,
-                jitter_frac=0.10,
-                scale_div=2.0,
-            )
-            print(info)
-
-            optimizer = torch.optim.Adam([
-                {'params': [scene.W1, scene.b1, scene.W2, scene.b2, scene.W3, scene.b3], 'lr': 1e-3},
-                {'params': [scene.log_scales], 'lr': 1e-2},
-                {'params': [scene.positions], 'lr': 1e-4},
-            ])
-            _save_scene_with_optional_decoder(
-                os.path.join(output_dir, "after_pruning.pt"), scene, feature_decoder
-            )
-
-            did_densify = True
-        
-        if epoch % 5000 == 500 and epoch > 500:
-            fixed_ids = torch.empty(0, dtype=torch.long, device=scene.positions.device)
+                try:
+                    optimizer, info, fixed_ids, affected_ids = densify_and_prune(scene, optimizer)
+                    optimizer.zero_grad(set_to_none=True)
+                    if hasattr(scene, "reset_w_stats"):
+                        scene.reset_w_stats()
+                    did_densify = did_densify or bool(
+                        int(info.get("densified", 0)) > 0 or int(info.get("pruned", 0)) > 0
+                    )
+                    print(f"[densify/prune] epoch={epoch + 1} info={info}")
+                    _save_scene_with_optional_decoder(
+                        os.path.join(output_dir, f"scene_after_densify_prune_{epoch+1:05d}.pt"),
+                        scene,
+                        feature_decoder,
+                    )
+                except Exception as exc:
+                    print(f"[densify/prune] Failed at epoch {epoch + 1}: {exc}")
+                finally:
+                    if was_training:
+                        scene.train()
 
 
         # Eval after 500 epochs

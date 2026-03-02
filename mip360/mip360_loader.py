@@ -3,11 +3,29 @@ from __future__ import annotations
 import numpy as np
 import imageio
 import os
+import re
 import torch
 from collections import OrderedDict
 from torch.utils.data import Dataset
 from torchvision import transforms
 from utils.read_write_model import read_images_binary, read_cameras_binary, read_points3D_binary, qvec2rotmat
+
+
+def _basename_no_ext(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _last_int_suffix(name_no_ext: str) -> tuple[int, int]:
+    match = re.search(r"(\d+)$", name_no_ext)
+    if match:
+        return (1, int(match.group(1)))
+    return (0, -1)
+
+
+def _smart_image_sort_key(path: str):
+    base = _basename_no_ext(path)
+    has_num, num = _last_int_suffix(base)
+    return (-has_num, num, base)
 
 
 class mip360Dataset(Dataset):
@@ -46,27 +64,28 @@ class mip360Dataset(Dataset):
         images = read_images_binary(os.path.join(colmap_dir, "images.bin"))
         cameras = read_cameras_binary(os.path.join(colmap_dir, "cameras.bin"))
 
-        # === Keep the remaining part unchanged ===
-        # Load images first; this order becomes the canonical index order.
+        # Load images from disk with a numeric-suffix-aware order (e.g., image_2 before image_10).
         if factor == 1:
             image_dir = os.path.join(self.basedir, "images")
         else:
             image_dir = os.path.join(self.basedir, f"images_{factor}")
-        self.image_paths = sorted([
-            os.path.join(image_dir, f) for f in os.listdir(image_dir) if f.endswith(("JPG", "jpg", "png"))
-        ])
+        exts = (".JPG", ".jpg", ".png", ".PNG", ".jpeg", ".JPEG")
+        image_paths_all = [
+            os.path.join(image_dir, f)
+            for f in os.listdir(image_dir)
+            if f.endswith(exts)
+        ]
+        image_paths_all.sort(key=_smart_image_sort_key)
 
-        def _stem(path_or_name: str) -> str:
-            return os.path.splitext(os.path.basename(path_or_name))[0]
-
-        pose_by_stem = {}
-        hwf_by_stem = {}
+        # Build COLMAP pose/intrinsics lookup by basename (with extension).
+        pose_by_base = {}
+        hwf_by_base = {}
         for image_id in sorted(images.keys()):
             image = images[image_id]
             cam = cameras[image.camera_id]
-            stem = _stem(image.name)
-            if stem in pose_by_stem:
-                raise ValueError(f"Duplicated COLMAP image stem detected: '{stem}'")
+            base = os.path.basename(image.name)
+            if base in pose_by_base:
+                raise ValueError(f"Duplicated COLMAP image basename detected: '{base}'")
 
             # pose: w2c → c2w
             R = qvec2rotmat(image.qvec)
@@ -74,33 +93,43 @@ class mip360Dataset(Dataset):
             c2w = np.eye(4, dtype=np.float64)
             c2w[:3, :3] = R.T
             c2w[:3, 3] = -R.T @ t
-            pose_by_stem[stem] = c2w[:3, :4]
+            pose_by_base[base] = c2w[:3, :4]
 
             # intrinsic: assume fx = fy
             H, W = cam.height, cam.width
             fx = cam.params[0]
-            hwf_by_stem[stem] = [H, W, fx]
+            hwf_by_base[base] = [H, W, fx]
 
-        # Align pose/intrinsics to image filename order.
-        aligned_poses = []
-        aligned_hwf = []
-        missing_stems = []
-        for img_path in self.image_paths:
-            stem = _stem(img_path)
-            if stem not in pose_by_stem:
-                missing_stems.append(stem)
+        # Keep only images that are present in both disk directory and COLMAP.
+        matched_paths = []
+        matched_poses = []
+        matched_hwf = []
+        missing_in_colmap = []
+        for img_path in image_paths_all:
+            base = os.path.basename(img_path)
+            if base not in pose_by_base:
+                missing_in_colmap.append(base)
                 continue
-            aligned_poses.append(pose_by_stem[stem])
-            aligned_hwf.append(hwf_by_stem[stem])
+            matched_paths.append(img_path)
+            matched_poses.append(pose_by_base[base])
+            matched_hwf.append(hwf_by_base[base])
 
-        if missing_stems:
-            preview = ", ".join(missing_stems[:8])
-            raise KeyError(
-                f"COLMAP pose/intrinsics missing for {len(missing_stems)} image(s): {preview}"
+        if len(matched_paths) == 0:
+            raise RuntimeError(
+                f"No images matched between {image_dir} and COLMAP images.bin. "
+                f"Example disk file: {os.path.basename(image_paths_all[0]) if image_paths_all else 'N/A'}; "
+                f"Example colmap name: {next(iter(pose_by_base.keys())) if pose_by_base else 'N/A'}"
+            )
+        if len(missing_in_colmap) > 0:
+            print(
+                f"[Warn] {len(missing_in_colmap)} images exist on disk but not in COLMAP. "
+                f"First few: {missing_in_colmap[:10]}"
             )
 
-        poses = np.stack(aligned_poses, axis=0)  # (N, 3, 4), aligned to self.image_paths
-        hwf = np.array(aligned_hwf)              # (N, 3), aligned to self.image_paths
+        self.image_paths = matched_paths
+
+        poses = np.stack(matched_poses, axis=0)  # (N, 3, 4), aligned to self.image_paths
+        hwf = np.array(matched_hwf, dtype=np.float32)  # (N, 3), aligned to self.image_paths
 
         # === Normalize poses (keep original logic) ===
         positions = poses[:, :, 3]
@@ -189,7 +218,7 @@ class mip360Dataset(Dataset):
             # keep parity with dataset length if something goes wrong
             self.image_paths_selected = []
 
-        print(f"Loaded {len(self.images)} images from {image_dir}")
+        print(f"Loaded {len(self.images)} images from {image_dir} (matched from {len(self.image_paths)} total).")
 
 
     def __len__(self):

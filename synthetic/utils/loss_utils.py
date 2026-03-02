@@ -61,3 +61,56 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
         return ssim_map.mean()
     else:
         return ssim_map.mean(1).mean(1).mean(1)
+    
+
+
+
+"""
+import torch
+
+@torch.no_grad()
+def update_knn_cache(scene, k=8, chunk=2048, device=None):
+    pos = scene.positions.detach()
+    if device is not None:
+        pos = pos.to(device)
+    N = pos.shape[0]
+
+    knn_idx = torch.empty((N, k), device=pos.device, dtype=torch.long)
+    knn_dist2 = torch.empty((N, k), device=pos.device, dtype=torch.float32)
+
+    # 逐块计算与所有点的距离，取 topk (最小)
+    for i0 in range(0, N, chunk):
+        i1 = min(N, i0 + chunk)
+        q = pos[i0:i1]  # (C,3)
+
+        # (C,N) squared distances
+        # torch.cdist 默认返回 L2；这里用 cdist^2 或手写更省
+        d = torch.cdist(q, pos, p=2)  # (C,N)
+        d2 = d * d
+
+        # 排除自身（对角线）：对 query block 内对应的全局 index 置 inf
+        rows = torch.arange(i1 - i0, device=pos.device)
+        cols = torch.arange(i0, i1, device=pos.device)
+        d2[rows, cols] = float("inf")
+
+        # 取最近 k 个
+        vals, inds = torch.topk(d2, k=k, dim=1, largest=False, sorted=False)
+        knn_idx[i0:i1] = inds
+        knn_dist2[i0:i1] = vals
+
+    return knn_idx, knn_dist2
+
+
+
+def scale_knn_loss_weighted(scene, knn_idx, knn_dist2, sigma=0.05, eps=1e-4):
+    ls = scene.log_scales.squeeze(-1)          # (N,)
+    nbr = ls[knn_idx]                          # (N,k)
+    diff = ls[:, None] - nbr                   # (N,k)
+
+    sigma2 = sigma * sigma
+    w = torch.exp(-knn_dist2 / (2.0 * sigma2)) # (N,k)
+
+    num = (w * torch.sqrt(diff * diff + eps * eps)).sum()
+    den = w.sum() + 1e-12
+    return num / den
+"""

@@ -152,6 +152,22 @@ def build_scene_from_ckpt(ckpt_path: str, device: torch.device, engine: str | No
         scene_kwargs["feature_dim_low"] = int(feature_dim_low)
     scene = SceneCls(**scene_kwargs).to(device)
 
+    def remove_stat_buffers(scene):
+        REMOVE = [
+            "stat_sum_w",
+            "stat_max_w",
+            "stat_hits",
+            "stat_contrib_count",
+            "stat_sum_werr",
+            "alpha_accum"
+        ]
+
+        for name in REMOVE:
+            if hasattr(scene, name):
+                delattr(scene, name)   # ✅ 正确删除 buffer
+    remove_stat_buffers(scene)
+
+
     # Apply remap for tile engine to avoid unexpected/missing keys
     if SceneCls.__name__ == "NeuralPrimitiveSceneTileCUDA" or SceneCls.__name__ == "NeuralPrimitiveSceneSplatTileCUDA":
         sd = _remap_for_tile(sd)

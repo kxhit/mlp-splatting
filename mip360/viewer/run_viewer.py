@@ -135,6 +135,12 @@ class ViewerApp:
 		self._last_sigma_stats = (0.0, 0.0)
 		self._last_excluded_count = 0
 		self._last_total_count = 0
+		self.selection_inverted = False  # Flip selection colors/meaning without touching stored mask
+		# Move editing state
+		self.move_dx = 0.0
+		self.move_dy = 0.0
+		self.move_dz = 0.0
+		self._positions_backup = None  # backup of original positions for reset
 		# PSNR status (default invalid)
 		self._psnr_valid = False
 		self._psnr_value = None
@@ -224,35 +230,42 @@ class ViewerApp:
 				self.lock_checkbox = dpg.add_checkbox(label="Lock to dataset pose", default_value=False, callback=self._on_toggle_lock_view)
 				# PSNR readout (only valid when unlocked and exactly at a dataset pose)
 				self.psnr_text = dpg.add_text(default_value="PSNR: invalid")
-			self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow/red)", default_value=False, callback=self._on_toggle_overlay)
-			# Exclusion selection controls
-			self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
-			self.btn_all_set = dpg.add_button(label="all-set", callback=self._on_all_set, enabled=False)
-			self.btn_all_reset = dpg.add_button(label="all-reset", callback=self._on_all_reset, enabled=False)
-			# Threshold filters (for pruning preview)
-			self.scale_filter_checkbox = dpg.add_checkbox(label="Enable scale filter", default_value=False, callback=self._on_toggle_scale_filter)
-			self.scale_mode_combo = dpg.add_combo(
-				label="Scale filter mode",
-				items=["exclude < threshold", "exclude > threshold"],
-				default_value="exclude < threshold",
-				callback=self._on_scale_mode,
-			)
-			self.scale_thresh_slider = dpg.add_slider_float(
-				label="Scale threshold (relative)",
-				default_value=float(self.scale_filter_threshold),
-				min_value=0.0,
-				max_value=1.0,
-				callback=self._on_scale_threshold,
-			)
-			self.sigma_filter_checkbox = dpg.add_checkbox(label="Enable sigma filter", default_value=False, callback=self._on_toggle_sigma_filter)
-			self.sigma_thresh_slider = dpg.add_slider_float(
-				label="Sigma threshold",
-				default_value=float(self.sigma_filter_threshold),
-				min_value=0.0,
-				max_value=5.0,
-				callback=self._on_sigma_threshold,
-			)
-			self.filter_stats_text = dpg.add_text(default_value="Filter stats: excluded=0/0, scale_rel[min,max]=[0.000, 0.000], sigma[min,max]=[0.000, 0.000], scene_diag=1.0000")
+				self.overlay_checkbox = dpg.add_checkbox(label="Show MLP point centers (yellow/red)", default_value=False, callback=self._on_toggle_overlay)
+				# Exclusion selection controls
+				self.exclude_checkbox = dpg.add_checkbox(label="MLP Exclusion (Ctrl+Click)", default_value=False, callback=self._on_toggle_exclude_mode)
+				self.btn_flip_selection = dpg.add_button(label="flip (red<->yellow)", callback=self._on_flip_selection, enabled=False)
+				self.btn_all_set = dpg.add_button(label="all-exclude", callback=self._on_all_set, enabled=False)
+				self.btn_all_reset = dpg.add_button(label="all-include", callback=self._on_all_reset, enabled=False)
+				# Move selected (red) primitives by a global translation
+				self.move_dx_input = dpg.add_input_float(label="dx", default_value=0.0, width=120, callback=self._on_move_dx, enabled=False)
+				self.move_dy_input = dpg.add_input_float(label="dy", default_value=0.0, width=120, callback=self._on_move_dy, enabled=False)
+				self.move_dz_input = dpg.add_input_float(label="dz", default_value=0.0, width=120, callback=self._on_move_dz, enabled=False)
+				self.btn_move_selected = dpg.add_button(label="move-selected (red)", callback=self._on_move_selected, enabled=False)
+				self.btn_position_reset = dpg.add_button(label="position-reset", callback=self._on_position_reset, enabled=False)
+				# Threshold filters (for pruning preview)
+				self.scale_filter_checkbox = dpg.add_checkbox(label="Enable scale filter", default_value=False, callback=self._on_toggle_scale_filter)
+				self.scale_mode_combo = dpg.add_combo(
+					label="Scale filter mode",
+					items=["exclude < threshold", "exclude > threshold"],
+					default_value="exclude < threshold",
+					callback=self._on_scale_mode,
+				)
+				self.scale_thresh_slider = dpg.add_slider_float(
+					label="Scale threshold (relative)",
+					default_value=float(self.scale_filter_threshold),
+					min_value=0.0,
+					max_value=1.0,
+					callback=self._on_scale_threshold,
+				)
+				self.sigma_filter_checkbox = dpg.add_checkbox(label="Enable sigma filter", default_value=False, callback=self._on_toggle_sigma_filter)
+				self.sigma_thresh_slider = dpg.add_slider_float(
+					label="Sigma threshold",
+					default_value=float(self.sigma_filter_threshold),
+					min_value=0.0,
+					max_value=5.0,
+					callback=self._on_sigma_threshold,
+				)
+				self.filter_stats_text = dpg.add_text(default_value="Filter stats: excluded=0/0, scale_rel[min,max]=[0.000, 0.000], sigma[min,max]=[0.000, 0.000], scene_diag=1.0000")
 		with dpg.window(label="Render", width=self.W, height=self.H, pos=(10, 10)) as self.render_win:
 			with dpg.drawlist(width=self.W, height=self.H) as self.drawlist:
 				self.draw_image_id = dpg.draw_image(self.tex_id, (0, 0), (self.W, self.H))
@@ -331,10 +344,10 @@ class ViewerApp:
 							inside_t = torch.from_numpy(inside)
 							if self._rect_select_include:
 								# include -> un-exclude
-								self.excluded_mask[inside_t] = False
+								self._set_effective_excluded(inside_t, False)
 							else:
 								# exclude
-								self.excluded_mask[inside_t] = True
+								self._set_effective_excluded(inside_t, True)
 							# keep threshold filters active even when manual mode is off
 							self._sync_exclusion_to_scene()
 			except Exception:
@@ -566,6 +579,12 @@ class ViewerApp:
 		try:
 			dpg.configure_item(self.btn_all_set, enabled=self.enable_exclude_select)
 			dpg.configure_item(self.btn_all_reset, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.btn_flip_selection, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.move_dx_input, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.move_dy_input, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.move_dz_input, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.btn_move_selected, enabled=self.enable_exclude_select)
+			dpg.configure_item(self.btn_position_reset, enabled=self.enable_exclude_select)
 		except Exception:
 			pass
 		self._sync_exclusion_to_scene()
@@ -623,6 +642,7 @@ class ViewerApp:
 		if (self.excluded_mask is None) or (self.excluded_mask.numel() != N):
 			self.excluded_mask = torch.zeros(N, dtype=torch.bool)
 			self._log_scales_backup = None
+			self._positions_backup = None
 
 	def _compute_relative_scales(self, base_log_scales_cpu: torch.Tensor) -> torch.Tensor | None:
 		"""
@@ -727,6 +747,35 @@ class ViewerApp:
 		except Exception:
 			pass
 
+	def _effective_excluded_mask(self) -> torch.Tensor:
+		"""Return the current *effective* exclusion mask (red=True) as a CPU torch.bool tensor."""
+		self._ensure_exclusion_state()
+		if self.excluded_mask is None:
+			return torch.zeros(0, dtype=torch.bool)
+		try:
+			m = self.excluded_mask
+			# Always operate in bool
+			if m.dtype != torch.bool:
+				m = m.to(dtype=torch.bool)
+			# Keep on CPU for UI logic
+			if m.device.type != "cpu":
+				m = m.detach().cpu()
+			return m ^ bool(self.selection_inverted)
+		except Exception:
+			return torch.zeros(0, dtype=torch.bool)
+
+	def _set_effective_excluded(self, index, eff_value: bool):
+		"""Set excluded_mask so that effective mask at `index` becomes `eff_value` (True=red)."""
+		self._ensure_exclusion_state()
+		if self.excluded_mask is None or self.excluded_mask.numel() == 0:
+			return
+		v = bool(eff_value) ^ bool(self.selection_inverted)
+		try:
+			self.excluded_mask[index] = v
+		except Exception:
+			# best-effort; keep viewer running
+			pass
+
 	def _sync_exclusion_to_scene(self):
 		manual_enabled = bool(self.enable_exclude_select)
 		auto_enabled = bool(self.enable_scale_filter or self.enable_sigma_filter)
@@ -740,7 +789,6 @@ class ViewerApp:
 				total = 0
 			self._update_filter_stats_ui(excluded_count=0, total_count=total)
 		self.needs_redraw = True
-
 	def _apply_exclusion_mask_to_scene(self):
 		# Apply manual mask + threshold filter masks by shrinking log_scales.
 		self._ensure_exclusion_state()
@@ -756,7 +804,7 @@ class ViewerApp:
 			auto_mask = self._build_threshold_exclusion_mask(n_primitives, base_log_scales_cpu)
 			manual_mask = torch.zeros(n_primitives, dtype=torch.bool)
 			if self.enable_exclude_select and self.excluded_mask.numel() == n_primitives:
-				manual_mask = self.excluded_mask
+				manual_mask = self._effective_excluded_mask()
 			combined = (manual_mask | auto_mask)
 			self._update_filter_stats_ui(excluded_count=int(combined.sum().item()), total_count=n_primitives)
 			new_vals = self._log_scales_backup.detach().clone().to(device)
@@ -778,13 +826,22 @@ class ViewerApp:
 		except Exception:
 			pass
 
+
+	def _on_flip_selection(self):
+		# Flip the *interpretation* of selection (red<->yellow) without changing stored mask values.
+		self.selection_inverted = not bool(self.selection_inverted)
+		# If exclusion mode is active, re-apply to scene so hidden/visible swaps immediately.
+		if self.enable_exclude_select:
+			self._apply_exclusion_mask_to_scene()
+		self.needs_redraw = True
+
 	def _on_all_set(self):
 		# Exclude all primitives (only active when exclusion mode is enabled)
 		if not self.enable_exclude_select:
 			return
 		self._ensure_exclusion_state()
 		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
-			self.excluded_mask[:] = True
+			self._set_effective_excluded(slice(None), True)
 			self._sync_exclusion_to_scene()
 
 	def _on_all_reset(self):
@@ -793,8 +850,114 @@ class ViewerApp:
 			return
 		self._ensure_exclusion_state()
 		if self.excluded_mask is not None and self.excluded_mask.numel() > 0:
-			self.excluded_mask[:] = False
+			self._set_effective_excluded(slice(None), False)
 			self._sync_exclusion_to_scene()
+
+
+	def _ensure_position_backup(self):
+		"""Capture original primitive positions once (for position-reset)."""
+		try:
+			pos = self._get_scene_positions_tensor()
+			if pos is None:
+				return
+			if self._positions_backup is None or tuple(self._positions_backup.shape) != tuple(pos.shape) or self._positions_backup.device != pos.device:
+				self._positions_backup = pos.detach().clone()
+		except Exception:
+			pass
+
+	def _get_scene_positions_tensor(self):
+		"""Return the tensor holding primitive positions (preferred: scene.positions)."""
+		if getattr(self, 'scene', None) is None:
+			return None
+		if hasattr(self.scene, 'positions'):
+			return self.scene.positions
+		if hasattr(self.scene, 'pos'):
+			return self.scene.pos
+		return None
+
+	def _copy_positions_to_scene(self, new_pos: torch.Tensor):
+		"""Best-effort copy into scene.positions and scene.pos (if both exist)."""
+		if getattr(self, 'scene', None) is None:
+			return
+		try:
+			if hasattr(self.scene, 'positions') and isinstance(self.scene.positions, torch.Tensor):
+				with torch.no_grad():
+					self.scene.positions.copy_(new_pos)
+		except Exception:
+			pass
+		try:
+			if hasattr(self.scene, 'pos') and isinstance(self.scene.pos, torch.Tensor):
+				# avoid double copy if it's the same tensor
+				if not (hasattr(self.scene, 'positions') and self.scene.pos is self.scene.positions):
+					with torch.no_grad():
+						self.scene.pos.copy_(new_pos)
+		except Exception:
+			pass
+
+	def _on_move_dx(self, s, a):
+		try:
+			self.move_dx = float(a)
+		except Exception:
+			self.move_dx = 0.0
+
+	def _on_move_dy(self, s, a):
+		try:
+			self.move_dy = float(a)
+		except Exception:
+			self.move_dy = 0.0
+
+	def _on_move_dz(self, s, a):
+		try:
+			self.move_dz = float(a)
+		except Exception:
+			self.move_dz = 0.0
+
+	def _on_move_selected(self):
+		"""Translate currently-red (effective mask True) primitives by (dx,dy,dz)."""
+		if not self.enable_exclude_select:
+			return
+		pos = self._get_scene_positions_tensor()
+		if pos is None:
+			return
+		# cache original positions for reset
+		self._ensure_position_backup()
+		mask = self._effective_excluded_mask()
+		if mask is None or mask.numel() == 0:
+			return
+		if not bool(mask.any()):
+			return
+		try:
+			delta = torch.tensor([self.move_dx, self.move_dy, self.move_dz], dtype=pos.dtype, device=pos.device).view(1, 3)
+			mask_dev = mask.to(device=pos.device)
+			with torch.no_grad():
+				pos[mask_dev, :] += delta
+				# keep alias in sync if needed
+				self._copy_positions_to_scene(pos)
+		except Exception:
+			pass
+		self.needs_redraw = True
+		self._invalidate_psnr()
+
+	def _on_position_reset(self):
+		"""Restore all primitive positions to the checkpoint state."""
+		pos = self._get_scene_positions_tensor()
+		if pos is None:
+			return
+		if self._positions_backup is None:
+			# nothing to reset
+			return
+		try:
+			backup = self._positions_backup
+			# if device mismatch (rare), move backup
+			if backup.device != pos.device:
+				backup = backup.to(device=pos.device)
+			with torch.no_grad():
+				pos.copy_(backup)
+				self._copy_positions_to_scene(pos)
+		except Exception:
+			pass
+		self.needs_redraw = True
+		self._invalidate_psnr()
 
 	def _on_select_ckpt(self, s, a):
 		# a is the selected filename (basename)
@@ -934,10 +1097,256 @@ class ViewerApp:
 		py = (y * f_disp / z) + (self.H * 0.5)
 		return px.cpu(), py.cpu(), valid.cpu()
 
+	def _project_points_to_pixels_with_depth(
+		self,
+		points_world: torch.Tensor,
+		c2w: torch.Tensor
+	) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+		"""
+		Project 3D points to pixel coordinates for current camera.
+
+		Returns:
+		(px, py, z_cam, valid_mask, x_cam, y_cam)  all on CPU.
+		z_cam is the point depth in camera coordinates (same sign convention as projection).
+		"""
+		w2c_R = c2w[:3, :3].T
+		w2c_t = -w2c_R @ c2w[:3, 3]
+		pts_cam = (w2c_R @ points_world.T) + w2c_t.unsqueeze(1)  # (3,N)
+		x = pts_cam[0]
+		y = pts_cam[1]
+		z = pts_cam[2]
+
+		valid = z > 1e-6
+
+		fov = math.radians(self.cam.fov_deg)
+		f_disp = 0.5 * float(self.H) / math.tan(0.5 * fov)
+
+		px = (x * f_disp / z) + (self.W * 0.5)
+		py = (y * f_disp / z) + (self.H * 0.5)
+
+		return px.cpu(), py.cpu(), z.cpu(), valid.cpu(), x.cpu(), y.cpu()
+
+
 	def _draw_point_centers_overlay(self, frame_cpu: np.ndarray, c2w: torch.Tensor) -> np.ndarray:
 		# frame_cpu: (H,W,4) float32 in [0,1]
 		if not self.show_point_centers:
 			return frame_cpu
+
+		# ----------------------------
+		# Helpers (self-contained)
+		# ----------------------------
+		def _quat_to_rot_np(q: np.ndarray) -> np.ndarray:
+			"""
+			Quaternion to rotation matrix.
+			Assumes q = (w, x, y, z).
+			"""
+			q = q.astype(np.float32, copy=False)
+			wq, xq, yq, zq = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+			n = wq*wq + xq*xq + yq*yq + zq*zq
+			if n < 1e-12:
+				return np.eye(3, dtype=np.float32)
+			s = 2.0 / n
+
+			wx, wy, wz = s*wq*xq, s*wq*yq, s*wq*zq
+			xx, xy, xz = s*xq*xq, s*xq*yq, s*xq*zq
+			yy, yz, zz = s*yq*yq, s*yq*zq, s*zq*zq
+
+			R = np.array([
+				[1.0 - (yy + zz),        xy - wz,        xz + wy],
+				[       xy + wz, 1.0 - (xx + zz),        yz - wx],
+				[       xz - wy,        yz + wx, 1.0 - (xx + yy)],
+			], dtype=np.float32)
+			return R
+
+		def _draw_ellipse(cx: int, cy: int, a: float, b: float, theta: float, thickness: int = 0):
+			"""
+			Draw a red ellipse ring into frame_cpu (RGB channels).
+			a, b: semi-axes in pixels
+			theta: rotation in radians (image x-axis reference)
+			"""
+			if not (np.isfinite(a) and np.isfinite(b) and np.isfinite(theta)):
+				return
+			if a <= 0.5 or b <= 0.5:
+				return
+
+			a = float(np.clip(a, 1.0, 800.0))
+			b = float(np.clip(b, 1.0, 800.0))
+
+			# Sample points roughly proportional to circumference
+			n = int(max(64, min(2048, 2.0 * math.pi * max(a, b))))
+			c, s = math.cos(theta), math.sin(theta)
+
+			for k in range(n):
+				t = (2.0 * math.pi * k) / n
+				ex = a * math.cos(t)
+				ey = b * math.sin(t)
+
+				x = int(round(cx + ex * c - ey * s))
+				y = int(round(cy + ex * s + ey * c))
+
+				if 0 <= x < w and 0 <= y < h:
+					for dy in range(-thickness, thickness + 1):
+						for dx in range(-thickness, thickness + 1):
+							xx = x + dx
+							yy = y + dy
+							if 0 <= xx < w and 0 <= yy < h:
+								frame_cpu[yy, xx, 0] = 1.0
+								frame_cpu[yy, xx, 1] = 0.0
+								frame_cpu[yy, xx, 2] = 0.0
+								frame_cpu[yy, xx, 3] = 1.0
+
+		with torch.no_grad():
+			points = self.scene.positions  # (N,3) on device
+
+			# Need camera-space (x,y,z) for Jacobian-based anisotropic projection
+			px, py, zcam, valid, xcam, ycam = self._project_points_to_pixels_with_depth(points, c2w)
+			px = px.numpy()
+			py = py.numpy()
+			zcam = zcam.numpy()
+			xcam = xcam.numpy()
+			ycam = ycam.numpy()
+			valid = valid.numpy()
+
+			h, w = self.H, self.W
+			r = int(max(1, self.overlay_point_radius_px))
+
+			# excluded mask
+			mask_np = None
+			try:
+				eff = self._effective_excluded_mask()
+				if eff is not None and eff.numel() == points.shape[0]:
+					mask_np = eff.numpy().astype(bool, copy=False)
+			except Exception:
+				mask_np = None
+
+			# Read anisotropic parameters: log_scales (N,3), quats (N,4)
+			scales_np = None
+			quats_np = None
+			try:
+				ls = self._log_scales_backup
+				if ls is not None:
+					ls_np = ls.detach().float().cpu().numpy()
+					if ls_np.ndim == 2 and ls_np.shape[1] == 3:
+						scales_np = np.exp(ls_np).astype(np.float32, copy=False)  # (N,3)
+			except Exception:
+				scales_np = None
+
+			try:
+				qs = self.scene.quats
+				if qs is not None:
+					q_np = qs.detach().float().cpu().numpy()
+					if q_np.ndim == 2 and q_np.shape[1] == 4:
+						quats_np = q_np.astype(np.float32, copy=False)  # (N,4)
+			except Exception:
+				quats_np = None
+
+			# focal length in pixels (same as projection)
+			fov = math.radians(self.cam.fov_deg)
+			f_disp = 0.5 * float(self.H) / math.tan(0.5 * fov)
+
+			# camera rotation (world->cam) in numpy
+			w2c_R_np = c2w[:3, :3].T.detach().float().cpu().numpy().astype(np.float32, copy=False)
+
+			# k-sigma like factor: keep your original constant for comparable "ring size"
+			k_sigma = 2.146
+
+			# draw points: yellow by default, red if excluded; if excluded also draw anisotropic ellipse ring
+			for i in range(px.shape[0]):
+				if not valid[i]:
+					continue
+
+				xi = int(round(px[i]))
+				yi = int(round(py[i]))
+				if xi < 0 or xi >= w or yi < 0 or yi >= h:
+					continue
+
+				is_excl = False
+				if mask_np is not None and i < len(mask_np):
+					is_excl = bool(mask_np[i])
+
+				# ---- small center disk (keep original behavior) ----
+				for dy in range(-r, r + 1):
+					for dx in range(-r, r + 1):
+						if dx * dx + dy * dy <= r * r:
+							xp = xi + dx
+							yp = yi + dy
+							if 0 <= xp < w and 0 <= yp < h:
+								if is_excl:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 0.0
+									frame_cpu[yp, xp, 2] = 0.0
+								else:
+									frame_cpu[yp, xp, 0] = 1.0
+									frame_cpu[yp, xp, 1] = 1.0
+									frame_cpu[yp, xp, 2] = 0.0
+
+				# ---- excluded: draw anisotropic projected ellipse ----
+				if is_excl and (scales_np is not None) and (quats_np is not None):
+					if i >= scales_np.shape[0] or i >= quats_np.shape[0]:
+						continue
+
+					z = float(zcam[i])
+					if not np.isfinite(z) or z <= 1e-6:
+						continue
+
+					sx, sy, sz = float(scales_np[i, 0]), float(scales_np[i, 1]), float(scales_np[i, 2])
+					if (not np.isfinite(sx)) or (not np.isfinite(sy)) or (not np.isfinite(sz)):
+						continue
+					if sx <= 0.0 or sy <= 0.0 or sz <= 0.0:
+						continue
+
+					q = quats_np[i]
+					# 1) Sigma_world = R diag(s^2) R^T
+					Rw = _quat_to_rot_np(q)
+					D = np.diag([sx*sx, sy*sy, sz*sz]).astype(np.float32)
+					Sigma_world = Rw @ D @ Rw.T
+
+					# 2) Sigma_cam = w2c_R Sigma_world w2c_R^T
+					Sigma_cam = w2c_R_np @ Sigma_world @ w2c_R_np.T
+
+					# 3) J at mean (xcam,ycam,z)
+					x = float(xcam[i])
+					y = float(ycam[i])
+					if (not np.isfinite(x)) or (not np.isfinite(y)):
+						continue
+
+					f = float(f_disp)
+					invz = 1.0 / z
+					invz2 = invz * invz
+					J = np.array([
+						[f * invz, 0.0, -f * x * invz2],
+						[0.0, f * invz, -f * y * invz2],
+					], dtype=np.float32)
+
+					# 4) Sigma_img = J Sigma_cam J^T (2x2)
+					Sigma_img = J @ Sigma_cam @ J.T
+					Sigma_img = 0.5 * (Sigma_img + Sigma_img.T)  # symmetrize
+					Sigma_img[0, 0] += 1e-8
+					Sigma_img[1, 1] += 1e-8
+
+					# 5) eigen -> axes + angle
+					try:
+						evals, evecs = np.linalg.eigh(Sigma_img)  # ascending
+					except np.linalg.LinAlgError:
+						continue
+
+					l_small = float(evals[0])
+					l_large = float(evals[1])
+					if l_small <= 0.0 or l_large <= 0.0:
+						continue
+
+					a = k_sigma * math.sqrt(l_large)
+					b = k_sigma * math.sqrt(l_small)
+
+					# direction of largest eigenvalue
+					vx = float(evecs[0, 1])
+					vy = float(evecs[1, 1])
+					theta = math.atan2(vy, vx)
+
+					#_draw_ellipse(xi, yi, a, b, theta, thickness=0)
+
+		return frame_cpu
+
 		with torch.no_grad():
 			points = self.scene.positions  # (N,3) on device
 			px, py, valid = self._project_points_to_pixels(points, c2w)
@@ -948,8 +1357,9 @@ class ViewerApp:
 			r = int(max(1, self.overlay_point_radius_px))
 			mask_np = None
 			try:
-				if self.excluded_mask is not None and self.excluded_mask.numel() == points.shape[0]:
-					mask_np = self.excluded_mask.numpy()
+				eff = self._effective_excluded_mask()
+				if eff is not None and eff.numel() == points.shape[0]:
+					mask_np = eff.numpy()
 			except Exception:
 				mask_np = None
 			# draw points: yellow by default, red if excluded
@@ -1201,12 +1611,12 @@ class ViewerApp:
 
 				if hasattr(self.scene, 'set_image_size'):
 					self.scene.set_image_size(Wt_exp, Ht_exp)
-					
+
 				bg_color_val = 1.0 if self.white_bg else 0.0
 			with _nvtx_range("viewer/tile_cuda_scene_call", profile_frame):
 				rgb = self.scene(
-					rays_o, 
-					rays_d, 
+					rays_o,
+					rays_d,
 					bg_color=bg_color_val,
 					view_matrix=view_matrix,
 					proj_matrix=proj_matrix
@@ -1311,6 +1721,7 @@ class ViewerApp:
 			self._last_sigma_stats = (0.0, 0.0)
 			self._last_excluded_count = 0
 			self._last_total_count = N
+			self._positions_backup = None
 		except Exception:
 			self.excluded_mask = None
 			self._log_scales_backup = None
@@ -1319,6 +1730,7 @@ class ViewerApp:
 			self._last_sigma_stats = (0.0, 0.0)
 			self._last_excluded_count = 0
 			self._last_total_count = 0
+			self._positions_backup = None
 		# best effort free
 		try:
 			del old
@@ -1357,7 +1769,7 @@ class ViewerApp:
 					# Optional auto-exit for scripted profiling runs
 					if self._exit_after_profile and self._profile_done:
 						break
-				
+
 				dpg.render_dearpygui_frame()
 		except KeyboardInterrupt:
 			# Ensure profiling sessions flush even on Ctrl+C
@@ -1375,5 +1787,3 @@ def main():
 
 if __name__ == "__main__":
 	main()
-
-

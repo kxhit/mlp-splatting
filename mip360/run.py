@@ -23,6 +23,7 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-3, help="Base learning rate for trainable parameter groups.")
     parser.add_argument("--batch_size", type=int, default=12000, help="Used by vmodel engine (random rays).")
     parser.add_argument("--initial_num_primitives", type=int, default=2183)
+    parser.add_argument("--min_points", type=int, default=35, help="Minimum points per octree leaf when tile_cuda constructor supports it.")
     parser.add_argument("--seed", type=int, default=2025)
     parser.add_argument(
         "--engine",
@@ -138,9 +139,69 @@ if __name__ == "__main__":
         help="If GT feature files are missing, use deterministic RGB-projected mock features (for smoke tests).",
     )
     parser.add_argument(
+        "--lambda_dssim",
+        type=float,
+        default=0.1,
+        help="RGB loss blend coefficient: (1-lambda)*L1 + lambda*(1-SSIM).",
+    )
+    parser.add_argument(
+        "--late_cosine_start",
+        type=int,
+        default=80000,
+        help="Training step to start late-cosine LR decay.",
+    )
+    parser.add_argument(
+        "--late_cosine_total_steps",
+        type=int,
+        default=110000,
+        help="Training step where late-cosine reaches final min multiplier.",
+    )
+    parser.add_argument(
+        "--late_cosine_min_mlp",
+        type=float,
+        default=1e-2,
+        help="Minimum LR multiplier for MLP parameter group at late-cosine end.",
+    )
+    parser.add_argument(
+        "--late_cosine_min_scale",
+        type=float,
+        default=0.2,
+        help="Minimum LR multiplier for log-scale parameter group at late-cosine end.",
+    )
+    parser.add_argument(
+        "--late_cosine_min_position",
+        type=float,
+        default=0.3,
+        help="Minimum LR multiplier for center(position) parameter group at late-cosine end.",
+    )
+    parser.add_argument(
+        "--late_cosine_min_extra",
+        type=float,
+        default=0.2,
+        help="Minimum LR multiplier for optional extra groups (quats/features/decoder).",
+    )
+    parser.add_argument(
         "--enable_densify_prune",
         action="store_true",
         help="Re-enable densification/pruning (disabled by default for controlled experiments).",
+    )
+    parser.add_argument(
+        "--densify_prune_interval",
+        type=int,
+        default=5000,
+        help="Interval (steps) for densify/prune stats loop when enabled.",
+    )
+    parser.add_argument(
+        "--densify_prune_warmup_steps",
+        type=int,
+        default=2000,
+        help="Warmup steps before first densify/prune stats loop.",
+    )
+    parser.add_argument(
+        "--densify_prune_num_views",
+        type=int,
+        default=20,
+        help="Number of training views sampled to accumulate stats before densify/prune.",
     )
     parser.add_argument(
         "--preload_features",
@@ -195,6 +256,7 @@ if __name__ == "__main__":
         lr=args.lr,
         batch_size=args.batch_size,
         initial_num_primitives=args.initial_num_primitives,
+        min_points=args.min_points,
         engine=args.engine,
         tile_order=args.tile_order,
         resume_ckpt=args.resume_ckpt if args.resume_ckpt else None,
@@ -214,7 +276,17 @@ if __name__ == "__main__":
         feature_decoder_hidden_dim=args.feature_decoder_hidden_dim,
         feature_lowdim_divisor=args.feature_lowdim_divisor,
         feature_mock_from_rgb=args.feature_mock_from_rgb,
+        lambda_dssim=args.lambda_dssim,
+        late_cosine_start=args.late_cosine_start,
+        late_cosine_total_steps=args.late_cosine_total_steps,
+        late_cosine_min_mlp=args.late_cosine_min_mlp,
+        late_cosine_min_scale=args.late_cosine_min_scale,
+        late_cosine_min_position=args.late_cosine_min_position,
+        late_cosine_min_extra=args.late_cosine_min_extra,
         disable_densify_prune=(not args.enable_densify_prune),
+        densify_prune_interval=args.densify_prune_interval,
+        densify_prune_warmup_steps=args.densify_prune_warmup_steps,
+        densify_prune_num_views=args.densify_prune_num_views,
         preload_features=args.preload_features,
         feature_cache_size=args.feature_cache_size,
         ray_cache_size=args.ray_cache_size,
@@ -224,4 +296,3 @@ if __name__ == "__main__":
         dataloader_prefetch_factor=args.dataloader_prefetch_factor,
     )
     
-
