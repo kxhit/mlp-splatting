@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the paper below."
+title: "MLP Splatting"
+type: software
+version: "0.1.0"
+date-released: 2026-09-08
+authors:
+  - family-names: Kim
+    given-names: Shinjeong
+  - family-names: Cheng
+    given-names: Yuzhou
+  - family-names: Kong
+    given-names: Xin
+  - family-names: Kelly
+    given-names: "Paul H. J."
+  - family-names: Davison
+    given-names: "Andrew J."
+repository-code: "https://github.com/kxhit/mlp-splatting"
+url: "https://www.shinjeongkim.com/mlp-splatting/"
+preferred-citation:
+  type: conference-paper
+  title: "MLP Splatting: Object-Centric Neural Fields"
+  authors:
+    - family-names: Kim
+      given-names: Shinjeong
+    - family-names: Cheng
+      given-names: Yuzhou
+    - family-names: Kong
+      given-names: Xin
+    - family-names: Kelly
+      given-names: "Paul H. J."
+    - family-names: Davison
+      given-names: "Andrew J."
+  collection-title: "The European Conference on Computer Vision (ECCV)"
+  year: 2026
+  url: "https://arxiv.org/abs/2606.03877"

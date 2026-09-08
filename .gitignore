@@ -1,7 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Native/CUDA builds
+build/
+dist/
+*.so
+*.pyd
+.torch_extensions/
+
+# Experiment output and checkpoints
+outputs/
+results/
+eval_results/
+wandb/
+profile/
 *.pt
-**/__pycache__/
-**/wandb/
-**/profile/
+*.pth
+*.ckpt
+*.log
+
+# Editors and operating systems
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db

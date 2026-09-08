@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlp-splatting"
+version = "0.1.0"
+description = "Feature-aware, tile-based neural primitive rendering"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "imageio>=2.31",
+  "Pillow>=9.5",
+  "tqdm>=4.65",
+  "torch>=2.4",
+  "torchvision>=0.19",
+  "ninja>=1.11",
+]
+
+[project.optional-dependencies]
+evaluation = [
+  "lpips>=0.1.4",
+  "clip @ git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6",
+]
+tracking = ["wandb>=0.15"]
+
+[project.scripts]
+mlpsp-train = "mip360.run:main"
+mlpsp-train-replica = "replica.run:main"
+mlpsp-eval-rgb = "mip360.eval_rgb_psnr:main"
+mlpsp-eval-lseg = "mip360.eval_lseg_table2:main"
+mlpsp-benchmark = "tools.benchmark_inference:main"
+mlpsp-convert-checkpoint = "tools.convert_legacy_checkpoint:main"
+
+[tool.setuptools.packages.find]
+include = ["mip360*", "replica*", "tools*"]
+
+[tool.setuptools.package-data]
+mip360 = ["cuda/*.cu"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

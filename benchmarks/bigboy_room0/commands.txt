@@ -1,0 +1,8 @@
+# Public reproducer for the selected configuration. Run one command per shell.
+# Replace DATA and CHECKPOINT with local paths; both outputs contain full provenance.
+
+CUDA_VISIBLE_DEVICES=0 python tools/benchmark_inference.py --data DATA --checkpoint CHECKPOINT --dataset-loader replica --split-mode replica_feature3dgs --split-test-offset 2 --expected-views 10 --tile-order tilecenter --tile-size 8 --score-threshold 0.003 --warmup-cycles 3 --timed-cycles 3 --output benchmark-gpu0.json
+CUDA_VISIBLE_DEVICES=1 python tools/benchmark_inference.py --data DATA --checkpoint CHECKPOINT --dataset-loader replica --split-mode replica_feature3dgs --split-test-offset 2 --expected-views 10 --tile-order tilecenter --tile-size 8 --score-threshold 0.003 --warmup-cycles 3 --timed-cycles 3 --output benchmark-gpu1.json
+
+# Quality reference.
+CUDA_VISIBLE_DEVICES=0 python tools/benchmark_inference.py --data DATA --checkpoint CHECKPOINT --dataset-loader replica --split-mode replica_feature3dgs --split-test-offset 2 --expected-views 10 --tile-order per_pixel --tile-size 16 --score-threshold 0.003 --warmup-cycles 3 --timed-cycles 3 --output benchmark-reference-gpu0.json
