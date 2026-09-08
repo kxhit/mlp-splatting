@@ -225,7 +225,7 @@ benchmarks/bigboy_room0/        two-GPU selection evidence
 - Tile-center ordering is approximate. Validate against `per_pixel` when moving to a new dataset or resolution.
 - CUDA kernels have explicit checked capacities: tile-center order accepts up to 512 candidates per tile, while per-pixel order accepts up to 256 actual ray–primitive intersections. Conservative per-pixel tile lists may be larger. The renderer raises instead of silently truncating. Smaller tiles reduce tile-center candidate spans; a higher score threshold can reduce both candidates and actual hits.
 - In the current CUDA autograd path, feature loss updates `feat_attr` only; RGB supervision remains responsible for primitive geometry and appearance.
-- Feature extraction is outside this repository. Precomputed features must align with RGB stems and spatial resolution.
+- Feature extraction is outside this repository. Precomputed features must align with RGB filename stems; their spatial grid may differ and is matched during training.
 - No open-source license has been declared yet. Until the authors add one, the repository remains source-available without an implied reuse license. Third-party attribution is recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Citation
