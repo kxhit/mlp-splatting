@@ -60,7 +60,9 @@ tensor element count by 20%, but should not be presented as a renderer speedup.
 - `release_gpu{0,1}_tilecenter_t8_s3e-3.json`: final release reruns with
   per-frame timings, view manifests, source/checkpoint hashes, and sanitized
   commands.
-- `commands.txt`: public command templates.
+- `reference_gpu{0,1}_perpixel_t16_s3e-3.json`: clean-release quality-reference reruns.
+- `aggressive_gpu{0,1}_tilecenter_t8_s1e-2.json`: clean-release throughput-preset reruns.
+- `commands.txt`: portable command templates.
 
 Screening-source hashes (before public-tree curation):
 
@@ -74,17 +76,23 @@ d52da43a6ceee9912817359108985ac4f208d6aeaaf9277c8a7a4c5fd2eea748  replica/replic
 
 ## Clean release verification
 
-After curating the source tree, the committed `tools/benchmark_inference.py`
-harness was run again with the selected preset and a newly compiled extension.
-The same three-cycle warm-up and three-cycle timing protocol produced:
+After curating the source tree, commit `30cbdc5b39861138ee2d39f0ade6771740bfdf10`
+was cloned cleanly and its CUDA extension compiled independently for each GPU.
+All three finalists were rerun with the same three-cycle warm-up and timing
+protocol. Each cell below is mean FPS over 30 frames; PSNR is identical on both
+cards.
 
-| physical GPU | mean PSNR | RGB FPS | fused RGB+feature FPS | RGB parity |
-|---:|---:|---:|---:|---:|
-| 0 | 35.84900 | 28.3821 | 12.5743 | `max_abs=0` |
-| 1 | 35.84900 | 28.1834 | 12.4267 | `max_abs=0` |
-| mean | **35.84900** | **28.2827** | **12.5005** | `max_abs=0` |
+| configuration | PSNR | GPU 0 RGB | GPU 1 RGB | GPU 0 fused | GPU 1 fused | cross-GPU fused mean |
+|---|---:|---:|---:|---:|---:|---:|
+| per-pixel / 16 / `3e-3` | 35.90228 | 61.7820 | 60.7310 | 11.9669 | 11.7030 | 11.8349 |
+| **tile-center / 8 / `3e-3`** | **35.84900** | 28.5105 | 28.0571 | **12.6309** | **12.4295** | **12.5302** |
+| tile-center / 8 / `1e-2` | 35.69236 | 32.5897 | 32.2469 | 14.5264 | 14.4145 | 14.4704 |
 
-The release renderer hashes recorded by both JSON files are
-`6a1f173c…` for `mip360/cumodel.py` and `d811870c…` for the CUDA kernel.
-See `release_gpu{0,1}_tilecenter_t8_s3e-3.json` for the exact frames, timings,
-software stack, commands, and full SHA-256 values.
+Every report records a clean Git status, 10 fixed views, 30 timed samples per
+output mode, and `max_abs=0` RGB parity. The converted four-slot checkpoint is
+30,046,256 bytes with SHA-256
+`9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29`.
+The source hashes recorded by all six JSON files include
+`b8a9661a…` for `mip360/cumodel.py`, `907629b4…` for the CUDA kernel, and
+the checkpoint, loader, validation, evaluation, and benchmark modules. See the
+JSON files for full hashes, exact frames, timings, software stack, and commands.

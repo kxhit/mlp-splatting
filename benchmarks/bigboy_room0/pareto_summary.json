@@ -118,5 +118,52 @@
     "feature_max_abs": 1.9073486328125e-06,
     "feature_rmse": 1.3824633305754446e-08,
     "mean_psnr_db": 35.84899922730624
+  },
+  "clean_release_verification": {
+    "git_head": "30cbdc5b39861138ee2d39f0ade6771740bfdf10",
+    "checkpoint_file": "room0_lseg512_tile8_60000_slots4.pt",
+    "checkpoint_bytes": 30046256,
+    "checkpoint_sha256": "9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29",
+    "protocol": {
+      "physical_gpus": [0, 1],
+      "warmup_cycles": 3,
+      "timed_cycles": 3,
+      "views": 10,
+      "samples_per_gpu_and_mode": 30
+    },
+    "configurations": [
+      {
+        "order": "per_pixel",
+        "tile_size": 16,
+        "score_threshold": 0.003,
+        "mean_psnr_db": 35.902279658278125,
+        "mean_rgb_fps_across_gpus": 61.25653016666233,
+        "mean_fused_fps_across_gpus": 11.834947111137047,
+        "per_gpu_rgb_fps": {"0": 61.782036150030656, "1": 60.731024183294004},
+        "per_gpu_fused_fps": {"0": 11.966939363890178, "1": 11.702954858383917}
+      },
+      {
+        "order": "tilecenter",
+        "tile_size": 8,
+        "score_threshold": 0.003,
+        "mean_psnr_db": 35.84899922730624,
+        "mean_rgb_fps_across_gpus": 28.283788599232267,
+        "mean_fused_fps_across_gpus": 12.530203117728746,
+        "per_gpu_rgb_fps": {"0": 28.510450083544487, "1": 28.057127114920046},
+        "per_gpu_fused_fps": {"0": 12.630926042779484, "1": 12.429480192678007},
+        "fused_speedup_over_quality_reference": 1.0587460172033587,
+        "psnr_loss_vs_quality_reference_db": 0.05328043097188463
+      },
+      {
+        "order": "tilecenter",
+        "tile_size": 8,
+        "score_threshold": 0.01,
+        "mean_psnr_db": 35.692361418422,
+        "mean_rgb_fps_across_gpus": 32.41828300785585,
+        "mean_fused_fps_across_gpus": 14.47044216109642,
+        "per_gpu_rgb_fps": {"0": 32.58968165682066, "1": 32.24688435889105},
+        "per_gpu_fused_fps": {"0": 14.52642003985386, "1": 14.41446428233898}
+      }
+    ]
   }
 }

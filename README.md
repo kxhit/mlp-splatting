@@ -173,15 +173,17 @@ We screened the recovered feature renderer and cross-ran the finalists on physic
 
 | Ordering | Tile | Threshold | PSNR ↑ | RGB-only FPS ↑ | Fused RGB+feature FPS ↑ |
 |---|---:|---:|---:|---:|---:|
-| per-pixel | 16×16 | `3e-3` | **35.9023** | **61.30** | 11.36 |
-| **tile-center** | **8×8** | **`3e-3`** | **35.8490** | 28.38 | **12.45** |
-| tile-center, aggressive | 8×8 | `1e-2` | 35.6924 | 32.43 | 14.42 |
+| per-pixel | 16×16 | `3e-3` | **35.9023** | **61.26** | 11.83 |
+| **tile-center** | **8×8** | **`3e-3`** | **35.8490** | 28.28 | **12.53** |
+| tile-center, aggressive | 8×8 | `1e-2` | 35.6924 | 32.42 | 14.47 |
 
-The released default is **tile-center / 8×8 / `3e-3`**. For fused feature inference it is 9.6% faster than the cross-GPU per-pixel finalist while losing only 0.053 dB PSNR. The `1e-2` preset is faster but gives up another 0.157 dB. Fused and RGB-only kernels produced bit-exact RGB in every finalist run.
+The released default is **tile-center / 8×8 / `3e-3`**. On the frozen clean release, fused feature inference is 5.9% faster than the cross-GPU per-pixel quality reference while losing only 0.053 dB PSNR. The `1e-2` preset is another 15.5% faster but gives up a further 0.157 dB. Fused and RGB-only kernels produced bit-exact RGB in every run.
 
-We then reran the frozen clean release candidate through the committed benchmark harness on both cards. It reproduced **35.8490 dB**, measured **12.50 fused FPS** and **28.28 RGB-only FPS**, and again gave `max_abs=0` RGB parity. The two release JSON files are included beside the selection matrix.
+All values in the table are frozen-commit reruns: 30 measured frames per GPU and output mode after complete warm-up. The [GPU 0](benchmarks/bigboy_room0/release_gpu0_tilecenter_t8_s3e-3.json) and [GPU 1](benchmarks/bigboy_room0/release_gpu1_tilecenter_t8_s3e-3.json) reports contain raw timings and provenance; reference and aggressive reports sit beside them.
 
 These are engineering measurements for code selection, not replacements for the paper tables. Raw per-frame results and the complete protocol are committed under [`benchmarks/bigboy_room0`](benchmarks/bigboy_room0/README.md).
+
+The exact converted four-slot checkpoint used above is attached to [release `v0.1.0`](https://github.com/kxhit/mlp-splatting/releases/download/v0.1.0/room0_lseg512_tile8_60000_slots4.pt) (30,046,256 bytes; SHA-256 `9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29`).
 
 ## Legacy feature checkpoints
 
