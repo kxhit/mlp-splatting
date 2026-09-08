@@ -38,12 +38,10 @@ __device__ __forceinline__ void atomicMaxFloatPos(float* addr, float val) {
 #endif
 
 // EN: Fast sigmoid approximation/helper used in MLP output activation.
-// KO: MLP 출력 활성화에 사용하는 빠른 sigmoid 보조 함수입니다.
 __device__ __forceinline__ float fast_sigmoid(float x) {
   return 1.0f / (1.0f + __expf(-x));
 }
 // EN: Numerically stable softplus helper for density activation.
-// KO: 밀도 활성화를 위한 수치적으로 안정적인 softplus 보조 함수입니다.
 __device__ __forceinline__ float fast_softplus(float x) {
   if (x > 20.f) return x;
   if (x < -20.f) return __expf(x);
@@ -51,13 +49,47 @@ __device__ __forceinline__ float fast_softplus(float x) {
 }
 
 // EN: Computes 3D dot product with FMA for better precision/perf.
-// KO: 정밀도/성능을 위해 FMA를 사용한 3차원 내적 계산 함수입니다.
 __device__ __forceinline__ float dot3(float ax, float ay, float az, float bx, float by, float bz) {
   return fmaf(ax, bx, fmaf(ay, by, az * bz));
 }
 
+__device__ __forceinline__ float clamp_m11(float x) {
+  return fminf(1.f, fmaxf(-1.f, x));
+}
+
+// Local-coordinate tetrahedral gating used by semantic slot mixing.
+// feat_slots=4 : f = sum_k g_k * slot_k
+// feat_slots=5 : f = base + sum_k g_k * delta_k
+__device__ __forceinline__ void semantic_tetra_gates(
+    const float qlx, const float qly, const float qlz,
+    const float lgx, const float lgy, const float lgz,
+    const float norm_beta,
+    const float logit_temp,
+    float& g0, float& g1, float& g2, float& g3) {
+  const float sx = __expf(lgx);
+  const float sy = __expf(lgy);
+  const float sz = __expf(lgz);
+  const float ux = clamp_m11(qlx / (norm_beta * sx + 1e-6f));
+  const float uy = clamp_m11(qly / (norm_beta * sy + 1e-6f));
+  const float uz = clamp_m11(qlz / (norm_beta * sz + 1e-6f));
+
+  const float l0 = logit_temp * ( ux + uy + uz);
+  const float l1 = logit_temp * ( ux - uy - uz);
+  const float l2 = logit_temp * (-ux + uy - uz);
+  const float l3 = logit_temp * (-ux - uy + uz);
+  const float lm = fmaxf(fmaxf(l0, l1), fmaxf(l2, l3));
+  const float e0 = __expf(l0 - lm);
+  const float e1 = __expf(l1 - lm);
+  const float e2 = __expf(l2 - lm);
+  const float e3 = __expf(l3 - lm);
+  const float inv_sum = 1.f / fmaxf(e0 + e1 + e2 + e3, 1e-8f);
+  g0 = e0 * inv_sum;
+  g1 = e1 * inv_sum;
+  g2 = e2 * inv_sum;
+  g3 = e3 * inv_sum;
+}
+
 // EN: Copies float buffer with vectorized path when aligned.
-// KO: 정렬이 맞으면 float4 벡터 경로로 float 버퍼를 복사합니다.
 __device__ __noinline__ void copy_float_strided_vec4(
     float* __restrict__ dst,
     const float* __restrict__ src,
@@ -80,7 +112,6 @@ __device__ __noinline__ void copy_float_strided_vec4(
 }
 
 // EN: Best-effort L2 prefetch for next primitive weights.
-// KO: 다음 primitive 가중치에 대한 best-effort L2 프리페치입니다.
 __device__ __noinline__ void prefetch_weights_l2(
     const float* __restrict__ W1,
     const float* __restrict__ b1,
@@ -100,10 +131,10 @@ __device__ __noinline__ void prefetch_weights_l2(
   const float* b1p = b1 + static_cast<size_t>(p) * H;
   const float* W2p = W2 + static_cast<size_t>(p) * H * H;
   const float* b2p = b2 + static_cast<size_t>(p) * H;
-  const float* W3p = W3 + static_cast<size_t>(p) * H * H;
-  const float* b3p = b3 + static_cast<size_t>(p) * H;
+  // The output layer is [4, H] with a four-element bias per primitive.
+  const float* W3p = W3 + static_cast<size_t>(p) * 4 * H;
+  const float* b3p = b3 + static_cast<size_t>(p) * 4;
 
-  // TODO: 왜 아래 prefetch logic이 이렇게 짜여 있는지 모르겠음.
   // Prefetch a bounded window per tensor to avoid excess prefetch traffic.
   for (int i = 0; i < 256; i += 32) l2_prefetch(W1p + i);
   for (int i = 0; i < 64; i += 32) l2_prefetch(W2p + i);
@@ -116,35 +147,30 @@ __device__ __noinline__ void prefetch_weights_l2(
 
 template <typename T>
 // EN: Converts scalar CUDA type to float (generic path).
-// KO: CUDA 스칼라 타입을 float으로 변환합니다(일반 경로).
 __device__ __forceinline__ float scalar_to_float(T v) {
   return static_cast<float>(v);
 }
 
 template <>
 // EN: Converts half precision scalar to float.
-// KO: half 정밀도 스칼라를 float으로 변환합니다.
 __device__ __forceinline__ float scalar_to_float<__half>(__half v) {
   return __half2float(v);
 }
 
 template <>
 // EN: Converts bfloat16 scalar to float.
-// KO: bfloat16 스칼라를 float으로 변환합니다.
 __device__ __forceinline__ float scalar_to_float<__nv_bfloat16>(__nv_bfloat16 v) {
   return __bfloat162float(v);
 }
 
 template <typename T>
 // EN: Loads one scalar from memory and returns it as float.
-// KO: 메모리에서 스칼라 하나를 읽어 float으로 반환합니다.
 __device__ __forceinline__ float load_as_float(const T* p) {
   return scalar_to_float<T>(*p);
 }
 
 template <typename WType>
 // EN: Computes row-vector dot product between weights and input vector.
-// KO: 가중치 행 벡터와 입력 벡터의 내적을 계산합니다.
 __device__ __forceinline__ float row_dot_vec(const WType* w, const float* x, int n) {
   float acc = 0.f;
   for (int i = 0; i < n; ++i) acc = fmaf(load_as_float(w + i), x[i], acc);
@@ -153,7 +179,6 @@ __device__ __forceinline__ float row_dot_vec(const WType* w, const float* x, int
 
 template <>
 // EN: Optimized row dot product for half weights using half2.
-// KO: half2를 이용한 half 가중치 전용 최적화 내적 계산입니다.
 __device__ __forceinline__ float row_dot_vec<__half>(const __half* w, const float* x, int n) {
   float acc = 0.f;
   int i = 0;
@@ -169,7 +194,6 @@ __device__ __forceinline__ float row_dot_vec<__half>(const __half* w, const floa
 
 template <>
 // EN: Optimized row dot product for bfloat16 weights using vectorized loads.
-// KO: 벡터화 로드를 사용하는 bfloat16 가중치 전용 최적화 내적 계산입니다.
 __device__ __forceinline__ float row_dot_vec<__nv_bfloat16>(const __nv_bfloat16* w, const float* x, int n) {
   float acc = 0.f;
   int i = 0;
@@ -185,14 +209,12 @@ __device__ __forceinline__ float row_dot_vec<__nv_bfloat16>(const __nv_bfloat16*
 
 template <typename WType>
 // EN: Strided copy from typed weights to float buffer.
-// KO: 타입 가중치 배열을 stride 방식으로 float 버퍼에 복사합니다.
 __device__ __forceinline__ void cast_copy_strided(float* dst, const WType* src, int n, int tid, int stride) {
   for (int i = tid; i < n; i += stride) dst[i] = load_as_float(src + i);
 }
 
 template <>
 // EN: Strided cast-copy specialized for half using half2 conversion.
-// KO: half2 변환을 활용한 half 전용 stride 캐스팅 복사입니다.
 __device__ __forceinline__ void cast_copy_strided<__half>(float* dst, const __half* src, int n, int tid, int stride) {
   int i = tid * 2;
   const int step = stride * 2;
@@ -207,7 +229,6 @@ __device__ __forceinline__ void cast_copy_strided<__half>(float* dst, const __ha
 
 template <>
 // EN: Strided cast-copy specialized for bfloat16 using packed conversion.
-// KO: packed 변환을 활용한 bfloat16 전용 stride 캐스팅 복사입니다.
 __device__ __forceinline__ void cast_copy_strided<__nv_bfloat16>(float* dst, const __nv_bfloat16* src, int n, int tid, int stride) {
   int i = tid * 2;
   const int step = stride * 2;
@@ -221,23 +242,31 @@ __device__ __forceinline__ void cast_copy_strided<__nv_bfloat16>(float* dst, con
 }
 
 // EN: Warp-aggregated atomic add to reduce atomic contention on float grads.
-// KO: float gradient 원자 연산 경쟁을 줄이기 위한 warp 집계 atomic add입니다.
 // EN: Threads targeting the same address are reduced first, then one atomicAdd is issued.
-// KO: 같은 주소를 갱신하는 스레드들을 먼저 합산한 뒤 atomicAdd를 1회 수행합니다.
-// Volta 미만의 아키텍처에서는 단순 atomicAdd를 사용합니다.
+// Architectures before Volta fall back to a plain atomicAdd.
 __device__ __forceinline__ void atomic_add_warp_agg(float* addr, float value) {
 #if __CUDA_ARCH__ >= 700
   const unsigned active = __activemask();
   const unsigned peers = __match_any_sync(active, (unsigned long long)addr);
   const int lane = (int)threadIdx.x & 31;
   const int leader = __ffs((int)peers) - 1;
-  float sum = value;
-  #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    const float other = __shfl_down_sync(peers, sum, offset);
-    if ((lane + offset) < 32 && (peers & (1u << (lane + offset)))) {
-      sum += other;
-    }
+  if ((peers & (peers - 1u)) == 0u) {
+    atomicAdd(addr, value);
+    return;
+  }
+
+  // `peers` is generally sparse: pixels in one warp can be backpropagating
+  // different compact hit indices.  A fixed shfl-down tree only works for a
+  // contiguous lane group and drops values for masks such as lanes {0, 3}.
+  // Enumerating the participating source lanes is correct for every mask.  All
+  // lanes in a peer group execute the same shuffles, as required by *_sync.
+  float sum = 0.f;
+  unsigned remaining = peers;
+  while (remaining != 0u) {
+    const int src_lane = __ffs((int)remaining) - 1;
+    const float peer_value = __shfl_sync(peers, value, src_lane);
+    if (lane == leader) sum += peer_value;
+    remaining &= remaining - 1u;
   }
   if (lane == leader) atomicAdd(addr, sum);
 #else
@@ -246,7 +275,6 @@ __device__ __forceinline__ void atomic_add_warp_agg(float* addr, float value) {
 }
 
 // EN: Evaluates the MLP for one 6D feature and returns RGB + raw sigma.
-// KO: 단일 6D feature에 대해 MLP를 평가하여 RGB와 sigma raw를 반환합니다.
 template <typename WType>
 __device__ __forceinline__ void mlp_eval_rgb_sigma(
     const float* __restrict__ freq_bands,
@@ -259,7 +287,7 @@ __device__ __forceinline__ void mlp_eval_rgb_sigma(
     const float v6[6],
     float &out_r, float &out_g, float &out_b, float &out_sigma_raw)
 {
-  // 이 함수 원래 3 layer 일 때를 가정하고 짜여 있었음. 이제 4 layer로 수정함.
+  // Uses the current four-layer MLP layout.
   float h1[MLPSP_MAX_H];
   const int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
   for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = load_as_float(b1p + h_idx);
@@ -306,7 +334,6 @@ __device__ __forceinline__ void mlp_eval_rgb_sigma(
   out_sigma_raw = fast_softplus(o6);
 }
 // EN: Computes ray-to-primitive closest approach and Gaussian culling terms.
-// KO: 레이-프리미티브 최근접 접근 및 가우시안 컬링 관련 값을 계산합니다.
 __device__ __forceinline__ bool hit_and_features(
     float rox, float roy, float roz,
     float rdx, float rdy, float rdz,
@@ -664,7 +691,8 @@ __global__ void render_tiles_kernel_with_sort(
     const float thr,
     // Outputs
     float* __restrict__ out_rgb,
-    float* __restrict__ out_alpha
+    float* __restrict__ out_alpha,
+    int32_t* __restrict__ intersection_overflow
 ){
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
@@ -691,6 +719,9 @@ __global__ void render_tiles_kernel_with_sort(
   float intersection_dx[MAX_INTERSECTIONS];
   float intersection_dy[MAX_INTERSECTIONS];
   float intersection_dz[MAX_INTERSECTIONS];
+  float intersection_qlx[MAX_INTERSECTIONS];
+  float intersection_qly[MAX_INTERSECTIONS];
+  float intersection_qlz[MAX_INTERSECTIONS];
   int intersection_count = 0;
 
   const int32_t prim_start = tile_offsets[tile_id];
@@ -702,9 +733,23 @@ __global__ void render_tiles_kernel_with_sort(
     const float cx = pos[p*3+0];
     const float cy = pos[p*3+1];
     const float cz = pos[p*3+2];
-    const float lg = logs[p];
+    const float lgx = logs[p*3+0];
+    const float lgy = logs[p*3+1];
+    const float lgz = logs[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+    float qlx, qly, qlz;
 
-    if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
+    if (hit_and_features_rot(rox, roy, roz, rdx, rdy, rdz,
+                             cx, cy, cz,
+                             lgx, lgy, lgz,
+                             qw, qx, qy, qz,
+                             thr,
+                             t, dx, dy, dz,
+                             qlx, qly, qlz,
+                             decay)) {
       if (intersection_count < MAX_INTERSECTIONS) {
         intersection_t[intersection_count] = t;
         intersection_prim_id[intersection_count] = p;
@@ -713,6 +758,9 @@ __global__ void render_tiles_kernel_with_sort(
         intersection_dy[intersection_count] = dy;
         intersection_dz[intersection_count] = dz;
         intersection_count++;
+      } else {
+        atomicExch(intersection_overflow, 1);
+        break;
       }
     }
   }
@@ -832,9 +880,502 @@ __global__ void render_tiles_kernel_with_sort(
   out_alpha[pix]   = 1.f - trans;
 }
 
+// Kernel: render tiles with per-pixel sorting + feature accumulation.
+__global__ void render_tiles_kernel_with_sort_and_feat(
+    // Rays and primitives
+    const float* __restrict__ rays_o,
+    const float* __restrict__ rays_d,
+    const float* __restrict__ pos,
+    const float* __restrict__ logs,
+    const float* __restrict__ quats,
+    const int32_t* __restrict__ culled_prim_indices,
+    const int32_t* __restrict__ tile_offsets,
+    // Encoding params
+    const float* __restrict__ freq_bands,
+    const float* __restrict__ attenuation,
+    const int F,
+    // MLP weights
+    const float* __restrict__ W1, const float* __restrict__ b1,
+    const float* __restrict__ W2, const float* __restrict__ b2,
+    const float* __restrict__ W3, const float* __restrict__ b3,
+    // Semantic feature attrs
+    const float* __restrict__ feat_attr,
+    const int feat_slots,
+    const int Cfeat,
+    const float gating_beta,
+    const float gating_temp,
+    const int N, const int H, const int IN,
+    // Image/tile
+    const int Wimg, const int Himg, const int TW, const int TH,
+    // Threshold
+    const float thr,
+    // Outputs
+    float* __restrict__ out_rgb,
+    float* __restrict__ out_alpha,
+    float* __restrict__ out_feat,
+    int32_t* __restrict__ intersection_overflow
+){
+  const int tile_x = blockIdx.x;
+  const int tile_y = blockIdx.y;
+  const int x = tile_x * TW + threadIdx.x;
+  const int y = tile_y * TH + threadIdx.y;
+  if (x >= Wimg || y >= Himg) return;
+
+  const int pix = y * Wimg + x;
+  const int tile_id = tile_y * ((Wimg + TW - 1)/TW) + tile_x;
+
+  // Load ray (already normalized from Python)
+  const float rox = rays_o[pix*3+0];
+  const float roy = rays_o[pix*3+1];
+  const float roz = rays_o[pix*3+2];
+  const float rdx = rays_d[pix*3+0];
+  const float rdy = rays_d[pix*3+1];
+  const float rdz = rays_d[pix*3+2];
+
+  // --- Stage 1: Gather intersections for this pixel ---
+  const int MAX_INTERSECTIONS = 256;
+  float intersection_t[MAX_INTERSECTIONS];
+  int   intersection_prim_id[MAX_INTERSECTIONS];
+  float intersection_decay[MAX_INTERSECTIONS];
+  float intersection_dx[MAX_INTERSECTIONS];
+  float intersection_dy[MAX_INTERSECTIONS];
+  float intersection_dz[MAX_INTERSECTIONS];
+  float intersection_qlx[MAX_INTERSECTIONS];
+  float intersection_qly[MAX_INTERSECTIONS];
+  float intersection_qlz[MAX_INTERSECTIONS];
+  int intersection_count = 0;
+
+  const int32_t prim_start = tile_offsets[tile_id];
+  const int32_t prim_end = tile_offsets[tile_id + 1];
+
+  for (int k = prim_start; k < prim_end; ++k) {
+    const int p = culled_prim_indices[k];
+    float t, dx, dy, dz, qlx, qly, qlz, decay;
+    const float cx = pos[p*3+0];
+    const float cy = pos[p*3+1];
+    const float cz = pos[p*3+2];
+    const float lgx = logs[p*3+0];
+    const float lgy = logs[p*3+1];
+    const float lgz = logs[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+
+    if (hit_and_features_rot(rox, roy, roz, rdx, rdy, rdz,
+                             cx, cy, cz,
+                             lgx, lgy, lgz,
+                             qw, qx, qy, qz,
+                             thr,
+                             t, dx, dy, dz,
+                             qlx, qly, qlz,
+                             decay)) {
+      if (intersection_count < MAX_INTERSECTIONS) {
+        intersection_t[intersection_count] = t;
+        intersection_prim_id[intersection_count] = p;
+        intersection_decay[intersection_count] = decay;
+        intersection_dx[intersection_count] = dx;
+        intersection_dy[intersection_count] = dy;
+        intersection_dz[intersection_count] = dz;
+        intersection_qlx[intersection_count] = qlx;
+        intersection_qly[intersection_count] = qly;
+        intersection_qlz[intersection_count] = qlz;
+        intersection_count++;
+      } else {
+        atomicExch(intersection_overflow, 1);
+        break;
+      }
+    }
+  }
+
+  // Always initialize output feature for this pixel.
+  float* dst_feat = out_feat + (size_t)pix * Cfeat;
+  for (int c = 0; c < Cfeat; ++c) dst_feat[c] = 0.f;
+
+  if (intersection_count == 0) {
+      out_rgb[pix*3+0] = 0.f;
+      out_rgb[pix*3+1] = 0.f;
+      out_rgb[pix*3+2] = 0.f;
+      out_alpha[pix] = 0.f;
+      return;
+  }
+
+  // --- Stage 2: Sort intersections by t (Insertion Sort) ---
+  for (int i = 1; i < intersection_count; i++) {
+    float key_t = intersection_t[i];
+    int   key_p = intersection_prim_id[i];
+    float key_decay = intersection_decay[i];
+    float key_dx = intersection_dx[i], key_dy = intersection_dy[i], key_dz = intersection_dz[i];
+    float key_qlx = intersection_qlx[i], key_qly = intersection_qly[i], key_qlz = intersection_qlz[i];
+    int j = i - 1;
+    while (j >= 0 && intersection_t[j] > key_t) {
+      intersection_t[j+1] = intersection_t[j];
+      intersection_prim_id[j+1] = intersection_prim_id[j];
+      intersection_decay[j+1] = intersection_decay[j];
+      intersection_dx[j+1] = intersection_dx[j];
+      intersection_dy[j+1] = intersection_dy[j];
+      intersection_dz[j+1] = intersection_dz[j];
+      intersection_qlx[j+1] = intersection_qlx[j];
+      intersection_qly[j+1] = intersection_qly[j];
+      intersection_qlz[j+1] = intersection_qlz[j];
+      j--;
+    }
+    intersection_t[j+1] = key_t;
+    intersection_prim_id[j+1] = key_p;
+    intersection_decay[j+1] = key_decay;
+    intersection_dx[j+1] = key_dx;
+    intersection_dy[j+1] = key_dy;
+    intersection_dz[j+1] = key_dz;
+    intersection_qlx[j+1] = key_qlx;
+    intersection_qly[j+1] = key_qly;
+    intersection_qlz[j+1] = key_qlz;
+  }
+
+  // --- Stage 3: Blend in sorted order ---
+  float3 C = make_float3(0.f, 0.f, 0.f);
+  float trans = 1.f;
+
+  for (int i = 0; i < intersection_count; ++i) {
+    const int p = intersection_prim_id[i];
+    const float decay = intersection_decay[i];
+    const float dx = intersection_dx[i];
+    const float dy = intersection_dy[i];
+    const float dz = intersection_dz[i];
+    const float qlx = intersection_qlx[i];
+    const float qly = intersection_qly[i];
+    const float qlz = intersection_qlz[i];
+
+    // Build 6D input vector
+    float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
+
+    // MLP evaluation
+    const float* W1p = W1 + (size_t)p * H * IN;
+    const float* b1p = b1 + (size_t)p * H;
+    const float* W2p = W2 + (size_t)p * H * H;
+    const float* b2p = b2 + (size_t)p * H;
+    const float* W3p = W3 + (size_t)p * 4 * H;
+    const float* b3p = b3 + (size_t)p * 4;
+
+    float h1[MLPSP_MAX_H];
+    int Hcap = H > MLPSP_MAX_H ? MLPSP_MAX_H : H;
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = b1p[h_idx];
+
+    const int cos_offset = IN / 2;
+    for (int c = 0; c < 6; ++c) {
+      for (int f = 0; f < F; ++f) {
+        const float fb = freq_bands[f];
+        const float att = attenuation[f];
+        const float xproj = v6[c] * fb * att;
+        const int j = c * F + f;
+        const float s = __sinf(xproj);
+        const float co = __cosf(xproj);
+        for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
+          const float* Wi = W1p + (size_t)h_idx * IN;
+          h1[h_idx] = fmaf(Wi[j], s, h1[h_idx]);
+          h1[h_idx] = fmaf(Wi[j + cos_offset], co, h1[h_idx]);
+        }
+      }
+    }
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = h1[h_idx] > 0.f ? h1[h_idx] : 0.f;
+
+    float h2[MLPSP_MAX_H];
+    for (int o = 0; o < Hcap; ++o) {
+      float acc = b2p[o];
+      const float* W2row = W2p + (size_t)o * H;
+      for (int h_idx = 0; h_idx < Hcap; ++h_idx) acc = fmaf(W2row[h_idx], h1[h_idx], acc);
+      h2[o] = acc > 0.f ? acc : 0.f;
+    }
+
+    float o3, o4, o5, o6;
+    o3=b3p[0]; o4=b3p[1]; o5=b3p[2]; o6=b3p[3];
+    for (int h_idx = 0; h_idx < Hcap; ++h_idx) {
+      const float hi = h2[h_idx];
+      o3 = fmaf(W3p[0*H + h_idx], hi, o3);
+      o4 = fmaf(W3p[1*H + h_idx], hi, o4);
+      o5 = fmaf(W3p[2*H + h_idx], hi, o5);
+      o6 = fmaf(W3p[3*H + h_idx], hi, o6);
+    }
+
+    const float sigma_raw = fast_softplus(o6);
+    const float sigma = sigma_raw * decay;
+    const float alpha = 1.f - __expf(-sigma);
+    const float w = trans * alpha;
+
+    const float R = fast_sigmoid(o3);
+    const float G = fast_sigmoid(o4);
+    const float Bc = fast_sigmoid(o5);
+    C.x = fmaf(w, R, C.x);
+    C.y = fmaf(w, G, C.y);
+    C.z = fmaf(w, Bc, C.z);
+
+    if (feat_slots <= 1) {
+      const float* src_feat = feat_attr + (size_t)p * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+    } else if (feat_slots == 5) {
+      float g0, g1, g2, g3;
+      const float lgx = logs[p*3+0];
+      const float lgy = logs[p*3+1];
+      const float lgz = logs[p*3+2];
+      semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+      const float* base = feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+      const float* d0 = feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+      const float* d1 = feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+      const float* d2 = feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+      const float* d3 = feat_attr + ((size_t)p * feat_slots + 4) * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        float mix = base[c];
+        mix = fmaf(g0, d0[c], mix);
+        mix = fmaf(g1, d1[c], mix);
+        mix = fmaf(g2, d2[c], mix);
+        mix = fmaf(g3, d3[c], mix);
+        dst_feat[c] = fmaf(w, mix, dst_feat[c]);
+      }
+    } else if (feat_slots == 4) {
+      float g0, g1, g2, g3;
+      const float lgx = logs[p*3+0];
+      const float lgy = logs[p*3+1];
+      const float lgz = logs[p*3+2];
+      semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+      const float* s0 = feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+      const float* s1 = feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+      const float* s2 = feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+      const float* s3 = feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        float mix = 0.f;
+        mix = fmaf(g0, s0[c], mix);
+        mix = fmaf(g1, s1[c], mix);
+        mix = fmaf(g2, s2[c], mix);
+        mix = fmaf(g3, s3[c], mix);
+        dst_feat[c] = fmaf(w, mix, dst_feat[c]);
+      }
+    } else {
+      const float* src_feat = feat_attr + (size_t)p * feat_slots * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+    }
+    trans *= (1.f - alpha);
+    if (trans < 1e-3f) break;
+  }
+
+  out_rgb[pix*3+0] = C.x;
+  out_rgb[pix*3+1] = C.y;
+  out_rgb[pix*3+2] = C.z;
+  out_alpha[pix]   = 1.f - trans;
+}
+
+// Backward (per-pixel): feat_attr-only gradient accumulation.
+__global__ void render_tiles_backward_featattr_per_pixel(
+    const float* __restrict__ rays_o,
+    const float* __restrict__ rays_d,
+    const float* __restrict__ pos,
+    const float* __restrict__ log_scales,
+    const float* __restrict__ quats,
+    const int32_t* __restrict__ culled_prim_indices,
+    const int32_t* __restrict__ tile_offsets,
+    const float* __restrict__ freq_bands,
+    const float* __restrict__ attenuation,
+    const int F,
+    const float* __restrict__ W1, const float* __restrict__ b1,
+    const float* __restrict__ W2, const float* __restrict__ b2,
+    const float* __restrict__ W3, const float* __restrict__ b3,
+    const int N, const int H, const int IN,
+    const int Wimg, const int Himg, const int TW, const int TH,
+    const float thr,
+    const float* __restrict__ grad_out_feat,
+    const int feat_slots,
+    const int Cfeat,
+    const float gating_beta,
+    const float gating_temp,
+    float* __restrict__ grad_feat_attr,
+    int32_t* __restrict__ intersection_overflow)
+{
+  const int tile_x = blockIdx.x;
+  const int tile_y = blockIdx.y;
+  const int x = tile_x * TW + threadIdx.x;
+  const int y = tile_y * TH + threadIdx.y;
+  if (x >= Wimg || y >= Himg) return;
+  const int pix = y * Wimg + x;
+  const int tile_id = tile_y * ((Wimg + TW - 1)/TW) + tile_x;
+
+  const float rox = rays_o[pix*3+0];
+  const float roy = rays_o[pix*3+1];
+  const float roz = rays_o[pix*3+2];
+  const float rdx = rays_d[pix*3+0];
+  const float rdy = rays_d[pix*3+1];
+  const float rdz = rays_d[pix*3+2];
+
+  const int32_t prim_start = tile_offsets[tile_id];
+  const int32_t prim_end = tile_offsets[tile_id + 1];
+
+  const int MAX_INTERSECTIONS = 256;
+  float intersection_t[MAX_INTERSECTIONS];
+  int   intersection_prim_id[MAX_INTERSECTIONS];
+  float intersection_decay[MAX_INTERSECTIONS];
+  float intersection_dx[MAX_INTERSECTIONS];
+  float intersection_dy[MAX_INTERSECTIONS];
+  float intersection_dz[MAX_INTERSECTIONS];
+  float intersection_qlx[MAX_INTERSECTIONS];
+  float intersection_qly[MAX_INTERSECTIONS];
+  float intersection_qlz[MAX_INTERSECTIONS];
+  int intersection_count = 0;
+
+  for (int k = prim_start; k < prim_end; ++k) {
+    const int p = culled_prim_indices[k];
+    float t, dx, dy, dz, qlx, qly, qlz, decay;
+    const float cx = pos[p*3+0];
+    const float cy = pos[p*3+1];
+    const float cz = pos[p*3+2];
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+
+    if (hit_and_features_rot(rox, roy, roz, rdx, rdy, rdz,
+                             cx, cy, cz,
+                             lgx, lgy, lgz,
+                             qw, qx, qy, qz,
+                             thr,
+                             t, dx, dy, dz,
+                             qlx, qly, qlz,
+                             decay)) {
+      if (intersection_count < MAX_INTERSECTIONS) {
+        intersection_t[intersection_count] = t;
+        intersection_prim_id[intersection_count] = p;
+        intersection_decay[intersection_count] = decay;
+        intersection_dx[intersection_count] = dx;
+        intersection_dy[intersection_count] = dy;
+        intersection_dz[intersection_count] = dz;
+        intersection_qlx[intersection_count] = qlx;
+        intersection_qly[intersection_count] = qly;
+        intersection_qlz[intersection_count] = qlz;
+        intersection_count++;
+      } else {
+        atomicExch(intersection_overflow, 1);
+        break;
+      }
+    }
+  }
+  if (intersection_count == 0) return;
+
+  for (int i = 1; i < intersection_count; i++) {
+    float key_t = intersection_t[i];
+    int   key_p = intersection_prim_id[i];
+    float key_decay = intersection_decay[i];
+    float key_dx = intersection_dx[i], key_dy = intersection_dy[i], key_dz = intersection_dz[i];
+    float key_qlx = intersection_qlx[i], key_qly = intersection_qly[i], key_qlz = intersection_qlz[i];
+    int j = i - 1;
+    while (j >= 0 && intersection_t[j] > key_t) {
+      intersection_t[j+1] = intersection_t[j];
+      intersection_prim_id[j+1] = intersection_prim_id[j];
+      intersection_decay[j+1] = intersection_decay[j];
+      intersection_dx[j+1] = intersection_dx[j];
+      intersection_dy[j+1] = intersection_dy[j];
+      intersection_dz[j+1] = intersection_dz[j];
+      intersection_qlx[j+1] = intersection_qlx[j];
+      intersection_qly[j+1] = intersection_qly[j];
+      intersection_qlz[j+1] = intersection_qlz[j];
+      j--;
+    }
+    intersection_t[j+1] = key_t;
+    intersection_prim_id[j+1] = key_p;
+    intersection_decay[j+1] = key_decay;
+    intersection_dx[j+1] = key_dx;
+    intersection_dy[j+1] = key_dy;
+    intersection_dz[j+1] = key_dz;
+    intersection_qlx[j+1] = key_qlx;
+    intersection_qly[j+1] = key_qly;
+    intersection_qlz[j+1] = key_qlz;
+  }
+
+  float trans = 1.f;
+  const float* gfeat_pix = grad_out_feat + (size_t)pix * Cfeat;
+
+  for (int i = 0; i < intersection_count; ++i) {
+    const int p = intersection_prim_id[i];
+    const float decay = intersection_decay[i];
+    const float dx = intersection_dx[i];
+    const float dy = intersection_dy[i];
+    const float dz = intersection_dz[i];
+    const float qlx = intersection_qlx[i];
+    const float qly = intersection_qly[i];
+    const float qlz = intersection_qlz[i];
+    float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
+
+    const float* W1p = W1 + (size_t)p * H * IN;
+    const float* b1p = b1 + (size_t)p * H;
+    const float* W2p = W2 + (size_t)p * H * H;
+    const float* b2p = b2 + (size_t)p * H;
+    const float* W3p = W3 + (size_t)p * 4 * H;
+    const float* b3p = b3 + (size_t)p * 4;
+    float R, G, Bc, sigma_raw;
+    mlp_eval_rgb_sigma(freq_bands, attenuation, F, W1p, b1p, W2p, b2p, W3p, b3p, H, IN, v6, R, G, Bc, sigma_raw);
+
+    const float sigma = sigma_raw * decay;
+    const float alpha = 1.f - __expf(-sigma);
+    const float w = trans * alpha;
+    if (w <= 0.f) {
+      trans *= (1.f - alpha);
+      if (trans < 1e-3f) break;
+      continue;
+    }
+
+    if (feat_slots <= 1) {
+      float* gfeat_prim = grad_feat_attr + (size_t)p * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        atomicAdd(&gfeat_prim[c], w * gfeat_pix[c]);
+      }
+    } else if (feat_slots == 5) {
+      const float lgx = log_scales[p*3+0];
+      const float lgy = log_scales[p*3+1];
+      const float lgz = log_scales[p*3+2];
+      float g0, g1, g2, g3;
+      semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+      float* gbase = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+      float* gd0 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+      float* gd1 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+      float* gd2 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+      float* gd3 = grad_feat_attr + ((size_t)p * feat_slots + 4) * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        const float gc = w * gfeat_pix[c];
+        atomicAdd(&gbase[c], gc);
+        atomicAdd(&gd0[c], gc * g0);
+        atomicAdd(&gd1[c], gc * g1);
+        atomicAdd(&gd2[c], gc * g2);
+        atomicAdd(&gd3[c], gc * g3);
+      }
+    } else if (feat_slots == 4) {
+      const float lgx = log_scales[p*3+0];
+      const float lgy = log_scales[p*3+1];
+      const float lgz = log_scales[p*3+2];
+      float g0, g1, g2, g3;
+      semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+      float* gs0 = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+      float* gs1 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+      float* gs2 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+      float* gs3 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        const float gc = w * gfeat_pix[c];
+        atomicAdd(&gs0[c], gc * g0);
+        atomicAdd(&gs1[c], gc * g1);
+        atomicAdd(&gs2[c], gc * g2);
+        atomicAdd(&gs3[c], gc * g3);
+      }
+    } else {
+      float* gfeat_prim = grad_feat_attr + (size_t)p * feat_slots * Cfeat;
+      for (int c = 0; c < Cfeat; ++c) {
+        atomicAdd(&gfeat_prim[c], w * gfeat_pix[c]);
+      }
+    }
+
+    trans *= (1.f - alpha);
+    if (trans < 1e-3f) break;
+  }
+}
+
 // Backward (per-pixel): count pass
 // EN: Backward prepass kernel that counts valid contributions per pixel (per-pixel order).
-// KO: 픽셀별 순서 기준으로 유효 기여 개수를 세는 backward 사전 카운트 커널입니다.
 __global__ void render_tiles_backward_count_per_pixel(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -852,7 +1393,8 @@ __global__ void render_tiles_backward_count_per_pixel(
     const int N, const int H, const int IN,
     const int Wimg, const int Himg, const int TW, const int TH,
     const float thr,
-    int32_t* __restrict__ out_counts)
+    int32_t* __restrict__ out_counts,
+    int32_t* __restrict__ intersection_overflow)
 {
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
@@ -883,12 +1425,25 @@ __global__ void render_tiles_backward_count_per_pixel(
 
   for (int k = prim_start; k < prim_end; ++k) {
     const int p = culled_prim_indices[k];
-    float t, dx, dy, dz, decay;
+    float t, dx, dy, dz, qlx, qly, qlz, decay;
     const float cx = pos[p*3+0];
     const float cy = pos[p*3+1];
     const float cz = pos[p*3+2];
-    const float lg = log_scales[p];
-    if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+    if (hit_and_features_rot(rox, roy, roz, rdx, rdy, rdz,
+                             cx, cy, cz,
+                             lgx, lgy, lgz,
+                             qw, qx, qy, qz,
+                             thr,
+                             t, dx, dy, dz,
+                             qlx, qly, qlz,
+                             decay)) {
       if (intersection_count < MAX_INTERSECTIONS) {
         intersection_t[intersection_count] = t;
         intersection_prim_id[intersection_count] = p;
@@ -897,6 +1452,9 @@ __global__ void render_tiles_backward_count_per_pixel(
         intersection_dz[intersection_count] = dz;
         intersection_decay[intersection_count] = decay;
         intersection_count++;
+      } else {
+        atomicExch(intersection_overflow, 1);
+        break;
       }
     }
   }
@@ -962,7 +1520,6 @@ __global__ void render_tiles_backward_count_per_pixel(
 
 // Backward (per-pixel): emit pass
 // EN: Backward emit kernel that materializes per-hit records and geometry grads (per-pixel order).
-// KO: 픽셀별 순서 기준으로 히트 레코드와 기하 gradient를 생성하는 backward emit 커널입니다.
 __global__ void render_tiles_backward_emit_per_pixel(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -989,7 +1546,9 @@ __global__ void render_tiles_backward_emit_per_pixel(
     float* __restrict__ out_grad_rgb,
     float* __restrict__ out_grad_sigma_raw,
     float* __restrict__ grad_positions,
-    float* __restrict__ grad_log_scales)
+    float* __restrict__ grad_log_scales,
+    float* __restrict__ grad_quats,
+    int32_t* __restrict__ intersection_overflow)
 {
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
@@ -1025,12 +1584,25 @@ __global__ void render_tiles_backward_emit_per_pixel(
 
   for (int k = prim_start; k < prim_end; ++k) {
     const int p = culled_prim_indices[k];
-    float t, dx, dy, dz, decay;
+    float t, dx, dy, dz, qlx, qly, qlz, decay;
     const float cx = pos[p*3+0];
     const float cy = pos[p*3+1];
     const float cz = pos[p*3+2];
-    const float lg = log_scales[p];
-    if (hit_and_features(rox, roy, roz, rdx, rdy, rdz, cx, cy, cz, lg, thr, t, dx, dy, dz, decay)) {
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+    if (hit_and_features_rot(rox, roy, roz, rdx, rdy, rdz,
+                             cx, cy, cz,
+                             lgx, lgy, lgz,
+                             qw, qx, qy, qz,
+                             thr,
+                             t, dx, dy, dz,
+                             qlx, qly, qlz,
+                             decay)) {
       if (intersection_count < MAX_INTERSECTIONS) {
         intersection_t[intersection_count] = t;
         intersection_prim_id[intersection_count] = p;
@@ -1039,6 +1611,9 @@ __global__ void render_tiles_backward_emit_per_pixel(
         intersection_dz[intersection_count] = dz;
         intersection_decay[intersection_count] = decay;
         intersection_count++;
+      } else {
+        atomicExch(intersection_overflow, 1);
+        break;
       }
     }
   }
@@ -1137,24 +1712,59 @@ __global__ void render_tiles_backward_emit_per_pixel(
     const float sigma = sigma_raw * decay;
     const float exp_neg_sigma = __expf(-sigma);
     const float grad_sigma = grad_alpha * exp_neg_sigma;
-    const float sigmoid_o6 = 1.f - __expf(-sigma_raw);
-    const float grad_sigma_raw = grad_sigma * decay * sigmoid_o6;
+    const float grad_sigma_raw = grad_sigma * decay;
 
     out_grad_sigma_raw[base + i] = grad_sigma_raw;
 
-    // geometry grads
-    const float s = __expf(log_scales[p]);
-    const float s2 = s * s;
-    const float perp2 = fmaxf(dx_arr[i]*dx_arr[i] + dy_arr[i]*dy_arr[i] + dz_arr[i]*dz_arr[i], 0.f);
+    // geometry grads (rotated ellipsoid)
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+    const float mx = __expf(-2.f * lgx);
+    const float my = __expf(-2.f * lgy);
+    const float mz = __expf(-2.f * lgz);
     const float grad_decay = grad_sigma * sigma_raw;
-    const float scale = -grad_decay * decay / (s2 + 1e-12f);
+    const float3 d = make_float3(dx_arr[i], dy_arr[i], dz_arr[i]);
+    const float3 qloc = quat_rotate_conj(qw, qx, qy, qz, d);
+    const float qlx = qloc.x;
+    const float qly = qloc.y;
+    const float qlz = qloc.z;
 
-    atomicAdd(&grad_positions[p*3+0], scale * dx_arr[i]);
-    atomicAdd(&grad_positions[p*3+1], scale * dy_arr[i]);
-    atomicAdd(&grad_positions[p*3+2], scale * dz_arr[i]);
+    // dL/d(qloc)
+    const float gqx_loc = -grad_decay * decay * mx * qlx;
+    const float gqy_loc = -grad_decay * decay * my * qly;
+    const float gqz_loc = -grad_decay * decay * mz * qlz;
 
-    const float grad_log_s = grad_decay * decay * perp2 / (s2 + 1e-12f);
-    atomicAdd(&grad_log_scales[p], grad_log_s);
+    // dL/dd = R * dL/d(qloc)
+    const float3 grad_loc = make_float3(gqx_loc, gqy_loc, gqz_loc);
+    const float3 grad_d = quat_rotate(qw, qx, qy, qz, grad_loc);
+    atomicAdd(&grad_positions[p*3+0], grad_d.x);
+    atomicAdd(&grad_positions[p*3+1], grad_d.y);
+    atomicAdd(&grad_positions[p*3+2], grad_d.z);
+
+    // dL/dlog_scales
+    atomicAdd(&grad_log_scales[p*3+0], grad_decay * decay * mx * qlx * qlx);
+    atomicAdd(&grad_log_scales[p*3+1], grad_decay * decay * my * qly * qly);
+    atomicAdd(&grad_log_scales[p*3+2], grad_decay * decay * mz * qlz * qlz);
+
+    // dL/dquats
+    const float gR00 = d.x * gqx_loc; const float gR01 = d.x * gqy_loc; const float gR02 = d.x * gqz_loc;
+    const float gR10 = d.y * gqx_loc; const float gR11 = d.y * gqy_loc; const float gR12 = d.y * gqz_loc;
+    const float gR20 = d.z * gqx_loc; const float gR21 = d.z * gqy_loc; const float gR22 = d.z * gqz_loc;
+    float gqw, ggqx, ggqy, ggqz;
+    rotmat_grad_to_quat_grad(qw, qx, qy, qz,
+                             gR00, gR01, gR02,
+                             gR10, gR11, gR12,
+                             gR20, gR21, gR22,
+                             gqw, ggqx, ggqy, ggqz);
+    atomicAdd(&grad_quats[p*4+0], gqw);
+    atomicAdd(&grad_quats[p*4+1], ggqx);
+    atomicAdd(&grad_quats[p*4+2], ggqy);
+    atomicAdd(&grad_quats[p*4+3], ggqz);
   }
 
   // emit records (forward order)
@@ -1181,7 +1791,6 @@ __global__ void render_tiles_backward_emit_per_pixel(
 // for distance/feature computation (not for ordering).
 template <typename WType>
 // EN: Forward rendering kernel using tile-center primitive ordering with shared-weight staging.
-// KO: shared weight staging과 타일 중심 순서를 사용하는 포워드 렌더링 커널입니다.
 __global__ void render_tiles_kernel_tilecenter_order(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -1206,11 +1815,13 @@ __global__ void render_tiles_kernel_tilecenter_order(
   const int tile_y = blockIdx.y;
   // Use a 1D block of (TW*TH) threads so CUB block primitives can be used safely.
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -1253,8 +1864,8 @@ __global__ void render_tiles_kernel_tilecenter_order(
     return;
   }
 
-  // Block-level radix sort assumes a fixed block size (16x16 => 256 threads).
-  // `cumodel.py` currently uses tile_size=16, so this holds for normal use.
+  // Block-level radix sort uses a fixed 256-thread block; only the first TW*TH threads map to pixels
+  // while the remaining threads participate in sort/staging work.
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
@@ -1264,7 +1875,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   // Load tile list + compute key on tile-center ray, then radix-sort by key (ascending).
@@ -1389,7 +2000,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
                                qlx, qly, qlz,
                                decay)) {
         float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
-        // ---- layer1: IN -> H (PE 입력) ----
+        // ---- layer1: IN -> H (positional-encoding input) ----
         float h1[MLPSP_MAX_H];
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = sb1[h_idx];
 
@@ -1506,16 +2117,18 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
     float* __restrict__ stat_sum_werr,             // ✅ NEW: (N)
     int32_t* __restrict__ stat_contrib_count       // ✅ NEW: (N)
 ){
-  constexpr float W_EPS = 1e-1f;   // 贡献阈值：1e-6 ~ 1e-5 可调
+  constexpr float W_EPS = 1e-1f;
 
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -1576,7 +2189,7 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
   __shared__ typename BlockReduceF::TempStorage reduce_storage_f;
   __shared__ typename BlockReduceI::TempStorage reduce_storage_i;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   float keys[ITEMS_PER_THREAD];
@@ -1651,7 +2264,7 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
     __syncthreads();
   };
 
-  // ✅ 修改：新增 local_werr / local_contrib
+  // Accumulate error-weighted and significant-contribution statistics.
   auto eval_and_blend = [&](int p,
                             float &local_w,
                             float &local_werr,
@@ -1732,10 +2345,10 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
 
         // ---- stats ----
         local_w = w;
-        local_hit = (w > 1e-8f) ? 1 : 0;         // ✅ 阈值化，替代 (w>0)
-        local_contrib = (w > W_EPS) ? 1 : 0;              // ✅ 贡献计数同一语义
+        local_hit = (w > 1e-8f) ? 1 : 0;
+        local_contrib = (w > W_EPS) ? 1 : 0;
 
-        // 当前 step blending 后的 pred（用于 pixel_error）
+        // Prediction after the current compositing step, used for pixel error.
         const float R = fast_sigmoid(o3);
         const float G = fast_sigmoid(o4);
         const float Bc = fast_sigmoid(o5);
@@ -1747,7 +2360,7 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
         // pixel_error: L1 (sum abs over RGB)
         const float err = fabsf(predR - gtR) + fabsf(predG - gtG) + fabsf(predB - gtB);
 
-        // sum_werr: w * pixel_error（只在有效贡献时累计更稳）
+        // Accumulate w * pixel_error only for significant contributions.
         if (w > W_EPS) local_werr = w * err;
 
         // ---- blend ----
@@ -1859,7 +2472,6 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
 
 // Backward (tilecenter): count pass
 // EN: Backward prepass kernel that counts valid contributions in tile-center traversal order.
-// KO: 타일 중심 순회 순서에서 유효 기여 개수를 세는 backward 사전 카운트 커널입니다.
 __global__ void render_tiles_backward_count_tilecenter(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -1882,11 +2494,13 @@ __global__ void render_tiles_backward_count_tilecenter(
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -1925,7 +2539,7 @@ __global__ void render_tiles_backward_count_tilecenter(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   float keys[ITEMS_PER_THREAD];
@@ -2019,7 +2633,6 @@ __global__ void render_tiles_backward_count_tilecenter(
 
 // Backward (tilecenter): emit pass
 // EN: Backward emit kernel for tile-center traversal that outputs hit-level gradients.
-// KO: 타일 중심 순회 기준으로 히트 단위 gradient를 출력하는 backward emit 커널입니다.
 __global__ void render_tiles_backward_emit_tilecenter(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -2051,11 +2664,13 @@ __global__ void render_tiles_backward_emit_tilecenter(
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -2096,7 +2711,7 @@ __global__ void render_tiles_backward_emit_tilecenter(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   float keys[ITEMS_PER_THREAD];
@@ -2264,7 +2879,6 @@ __global__ void render_tiles_backward_emit_tilecenter(
 // Backward (tilecenter full): compute MLP grads in-kernel (option A)
 template <typename WType>
 // EN: Full tile-center backward kernel computing MLP and geometry gradients in one pass.
-// KO: 타일 중심 기준으로 MLP/기하 gradient를 한 번에 계산하는 전체 backward 커널입니다.
 // The only effective backward kernel for tilecenter mode.
 __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const float* __restrict__ rays_o,
@@ -2295,11 +2909,13 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -2341,7 +2957,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   float keys[ITEMS_PER_THREAD];
@@ -2724,17 +3340,22 @@ __global__ void render_tiles_backward_featattr_tilecenter(
     const int Wimg, const int Himg, const int TW, const int TH,
     const float thr,
     const float* __restrict__ grad_out_feat,
+    const int feat_slots,
     const int Cfeat,
+    const float gating_beta,
+    const float gating_temp,
     float* __restrict__ grad_feat_attr)
 {
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -2844,9 +3465,46 @@ __global__ void render_tiles_backward_featattr_tilecenter(
       const float alpha = 1.f - __expf(-sigma);
       const float w = trans * alpha;
       const float* gfeat_pix = grad_out_feat + (size_t)pix * Cfeat;
-      float* gfeat_prim = grad_feat_attr + (size_t)p * Cfeat;
-      for (int c = 0; c < Cfeat; ++c) {
-        atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+      if (feat_slots <= 1) {
+        float* gfeat_prim = grad_feat_attr + (size_t)p * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+        }
+      } else if (feat_slots == 5) {
+        float g0, g1, g2, g3;
+        semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+        float* gbase = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+        float* gd0 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+        float* gd1 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+        float* gd2 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+        float* gd3 = grad_feat_attr + ((size_t)p * feat_slots + 4) * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          const float gc = w * gfeat_pix[c];
+          atomic_add_warp_agg(&gbase[c], gc);
+          atomic_add_warp_agg(&gd0[c], gc * g0);
+          atomic_add_warp_agg(&gd1[c], gc * g1);
+          atomic_add_warp_agg(&gd2[c], gc * g2);
+          atomic_add_warp_agg(&gd3[c], gc * g3);
+        }
+      } else if (feat_slots == 4) {
+        float g0, g1, g2, g3;
+        semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+        float* gs0 = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+        float* gs1 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+        float* gs2 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+        float* gs3 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          const float gc = w * gfeat_pix[c];
+          atomic_add_warp_agg(&gs0[c], gc * g0);
+          atomic_add_warp_agg(&gs1[c], gc * g1);
+          atomic_add_warp_agg(&gs2[c], gc * g2);
+          atomic_add_warp_agg(&gs3[c], gc * g3);
+        }
+      } else {
+        float* gfeat_prim = grad_feat_attr + (size_t)p * feat_slots * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+        }
       }
       trans *= (1.f - alpha);
     }
@@ -2871,7 +3529,6 @@ __global__ void render_tiles_backward_featattr_tilecenter(
 
 // Backward (tilecenter backprop-only, no atomics): profile compute cost without atomic accumulation.
 // EN: Tile-center backprop-only profiling kernel without atomic gradient accumulation.
-// KO: 원자적 gradient 누적 없이 동작하는 타일 중심 backprop 전용 프로파일링 커널입니다.
 __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backprop_noatomic(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -2896,11 +3553,13 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -3209,7 +3868,6 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
 
 // Backward (tilecenter traversal-only): profile traversal + MLP forward cost without backprop.
 // EN: Tile-center traversal-only profiling kernel that reports usage/transmittance.
-// KO: 사용량/투과도를 기록하는 타일 중심 순회 전용 프로파일링 커널입니다.
 __global__ void render_tiles_backward_tilecenter_traversal(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
@@ -3233,11 +3891,13 @@ __global__ void render_tiles_backward_tilecenter_traversal(
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -3372,7 +4032,6 @@ __global__ void render_tiles_backward_tilecenter_traversal(
 // Kernel: prim-major traversal, but assumes per-tile primitive lists are ALREADY ORDERED (no in-kernel sort).
 // Intended for "globaldepth" mode where the host sorts each tile's list by primitive center camera-space forward (view-space z).
 // EN: Forward rendering kernel that consumes a pre-sorted per-tile primitive list.
-// KO: 사전 정렬된 타일별 primitive 리스트를 사용하는 포워드 렌더링 커널입니다.
 // The only effective forward kernel for tilecenter_split mode.
 __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presorted(
     const float* __restrict__ rays_o,
@@ -3398,11 +4057,13 @@ __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presort
   const int tile_y = blockIdx.y;
   // 1D block of (TW*TH) threads
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -3436,7 +4097,7 @@ __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presort
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   // Load presorted per-tile primitive ids
@@ -3504,7 +4165,7 @@ __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presort
                              decay)) {
         float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
 
-        // ---- layer1: IN -> H (PE 입력) ----
+        // ---- layer1: IN -> H (positional-encoding input) ----
         float h1[MLPSP_MAX_H];
         for (int h_idx = 0; h_idx < Hcap; ++h_idx) h1[h_idx] = sb1[h_idx];
 
@@ -3547,7 +4208,7 @@ __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presort
         #pragma unroll 1
         for (int o = 0; o < Hcap; ++o) {
           const float xo = h2[o];
-          const float* wcol = sW3 + (size_t)o;   // column o 접근용 (아래서 k*Hcap stride)
+          const float* wcol = sW3 + (size_t)o;   // column o; k*Hcap stride below
           out4[0] = fmaf(wcol[0 * Hcap], xo, out4[0]);
           out4[1] = fmaf(wcol[1 * Hcap], xo, out4[1]);
           out4[2] = fmaf(wcol[2 * Hcap], xo, out4[2]);
@@ -3611,10 +4272,149 @@ __global__ __launch_bounds__(256, 4) void render_tiles_kernel_tilecenter_presort
 }
 
 
+// Validate the sparse tile list before rendering.  Tile-center kernels also
+// pass their fixed shared-list capacity.  Per-pixel kernels pass zero here and
+// report overflow from the actual per-ray hit gather instead, because a tile's
+// conservative candidate list can legitimately be larger than the hit buffer.
+__global__ void validate_tile_candidate_capacity_kernel(
+    const int32_t* __restrict__ tile_offsets,
+    const int num_tiles,
+    const int num_candidates,
+    const int capacity,
+    int32_t* __restrict__ status)
+{
+  for (int tile = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+       tile < num_tiles;
+       tile += (int)(blockDim.x * gridDim.x)) {
+    const int start = tile_offsets[tile];
+    const int end = tile_offsets[tile + 1];
+    if (start < 0 || end < start || end > num_candidates ||
+        (tile == 0 && start != 0) ||
+        (tile == num_tiles - 1 && end != num_candidates)) {
+      atomicOr(status, 1);
+      continue;
+    }
+    const int count = end - start;
+    if (capacity > 0 && count > capacity) {
+      atomicOr(status, 2);
+      atomicMax(status + 1, count);
+    }
+  }
+}
+
+static inline void validate_tile_candidate_capacity(
+    const torch::Tensor& culled_prim_indices,
+    const torch::Tensor& tile_offsets,
+    const int64_t Wimg,
+    const int64_t Himg,
+    const int64_t TW,
+    const int64_t TH,
+    const int capacity,
+    const char* path_name)
+{
+  TORCH_CHECK(Wimg > 0 && Himg > 0 && TW > 0 && TH > 0,
+              path_name, ": image and tile dimensions must be positive");
+  TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype() == at::kInt &&
+                  culled_prim_indices.dim() == 1 && culled_prim_indices.is_contiguous(),
+              path_name, ": culled_prim_indices must be a contiguous CUDA int32 vector");
+  TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype() == at::kInt &&
+                  tile_offsets.dim() == 1 && tile_offsets.is_contiguous(),
+              path_name, ": tile_offsets must be a contiguous CUDA int32 vector");
+
+  const int64_t tiles_x = (Wimg + TW - 1) / TW;
+  const int64_t tiles_y = (Himg + TH - 1) / TH;
+  const int64_t num_tiles64 = tiles_x * tiles_y;
+  TORCH_CHECK(num_tiles64 > 0 && num_tiles64 <= 2147483647LL,
+              path_name, ": tile grid is too large");
+  TORCH_CHECK(tile_offsets.numel() == num_tiles64 + 1,
+              path_name, ": tile_offsets length mismatch (got ", tile_offsets.numel(),
+              ", expected ", num_tiles64 + 1, ")");
+  TORCH_CHECK(culled_prim_indices.numel() <= 2147483647LL,
+              path_name, ": candidate list is too large for int32 offsets");
+
+  const int num_tiles = (int)num_tiles64;
+  const int num_candidates = (int)culled_prim_indices.numel();
+  auto status = torch::zeros({2}, tile_offsets.options());
+  const int threads = 256;
+  const int needed_blocks = (num_tiles + threads - 1) / threads;
+  const int blocks = needed_blocks < 4096 ? needed_blocks : 4096;
+  validate_tile_candidate_capacity_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      tile_offsets.data_ptr<int32_t>(), num_tiles, num_candidates, capacity,
+      status.data_ptr<int32_t>());
+  AT_CUDA_CHECK(cudaGetLastError());
+
+  // A host-visible decision is required to raise instead of returning a
+  // plausible-but-wrong image.  This is one 8-byte copy per checked public
+  // entry point; the render kernels themselves remain unchanged on valid data.
+  auto status_cpu = status.cpu();
+  const int32_t* status_ptr = status_cpu.data_ptr<int32_t>();
+  TORCH_CHECK((status_ptr[0] & 1) == 0,
+              path_name, ": tile_offsets must start at zero, end at the candidate-list length, "
+              "and be monotonic/in bounds");
+  if (capacity > 0) {
+    TORCH_CHECK((status_ptr[0] & 2) == 0,
+                path_name, ": tile candidate capacity ", capacity,
+                " exceeded (maximum observed tile length ", status_ptr[1],
+                "); refusing to truncate or use an inconsistent forward/backward order");
+  }
+}
+
+static inline void check_per_pixel_intersection_overflow(
+    const torch::Tensor& overflow,
+    const char* path_name)
+{
+  auto overflow_cpu = overflow.cpu();
+  TORCH_CHECK(overflow_cpu.data_ptr<int32_t>()[0] == 0,
+              path_name, ": per-pixel intersection capacity 256 exceeded; "
+              "refusing to return a silently truncated result");
+}
+
+
+// Internal test hook for masks whose equal-address lanes are non-contiguous.
+__global__ void test_atomic_add_warp_agg_kernel(
+    const int32_t* __restrict__ indices,
+    const float* __restrict__ values,
+    const int n,
+    const int out_size,
+    float* __restrict__ out)
+{
+  const int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (i >= n) return;
+  const int dst = indices[i];
+  if (dst >= 0 && dst < out_size) atomic_add_warp_agg(out + dst, values[i]);
+}
+
+torch::Tensor test_atomic_add_warp_agg_wrapper(
+    torch::Tensor indices,
+    torch::Tensor values,
+    int64_t out_size)
+{
+  TORCH_CHECK(indices.is_cuda() && indices.dtype() == at::kInt && indices.dim() == 1 && indices.is_contiguous(),
+              "indices must be a contiguous CUDA int32 vector");
+  TORCH_CHECK(values.is_cuda() && values.dtype() == at::kFloat && values.dim() == 1 && values.is_contiguous(),
+              "values must be a contiguous CUDA float32 vector");
+  TORCH_CHECK(indices.get_device() == values.get_device(), "indices and values must be on the same CUDA device");
+  TORCH_CHECK(indices.numel() == values.numel(), "indices and values must have the same length");
+  TORCH_CHECK(indices.numel() <= 2147483647LL, "test input is too large");
+  TORCH_CHECK(out_size > 0 && out_size <= 2147483647LL, "out_size must be a positive int32 value");
+
+  auto out = torch::zeros({out_size}, values.options());
+  const int n = (int)indices.numel();
+  if (n > 0) {
+    const int threads = 256;
+    const int blocks = (n + threads - 1) / threads;
+    test_atomic_add_warp_agg_kernel<<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
+        indices.data_ptr<int32_t>(), values.data_ptr<float>(), n, (int)out_size,
+        out.data_ptr<float>());
+    AT_CUDA_CHECK(cudaGetLastError());
+  }
+  return out;
+}
+
+
 class RenderTilesCUDASinglePass : public torch::autograd::Function<RenderTilesCUDASinglePass> {
 public:
     // EN: Autograd forward entry for single-pass per-pixel sorted renderer.
-    // KO: 단일 패스 픽셀별 정렬 렌더러의 autograd forward 진입점입니다.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -3640,8 +4440,7 @@ public:
         TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
         TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
         TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==2 && log_scales.size(1)==3);
-    TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
-    TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
+        TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
         TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
         TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
         TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
@@ -3649,6 +4448,9 @@ public:
 
         const int64_t B = rays_o.size(0);
         TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+        validate_tile_candidate_capacity(
+            culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+            "render_tiles_autograd");
 
         const int64_t N = positions.size(0);
         const int64_t Hh = W2.size(1);
@@ -3659,6 +4461,7 @@ public:
         auto opts_f = rays_o.options().dtype(at::kFloat);
         auto rgb = torch::zeros({B, 3}, opts_f);
         auto alpha = torch::zeros({B, 1}, opts_f);
+        auto overflow = torch::zeros({1}, rays_o.options().dtype(at::kInt));
 
         // Per-pixel kernel expects a 2D block layout (threadIdx.x/y map to pixel in tile).
         dim3 block((unsigned)TW, (unsigned)TH, 1);
@@ -3680,14 +4483,15 @@ public:
             (int)N, (int)Hh, (int)IN,
             (int)Wimg, (int)Himg, (int)TW, (int)TH,
             (float)threshold,
-            rgb.data_ptr<float>(), alpha.data_ptr<float>());
+            rgb.data_ptr<float>(), alpha.data_ptr<float>(),
+            overflow.data_ptr<int32_t>());
         AT_CUDA_CHECK(cudaGetLastError());
+        check_per_pixel_intersection_overflow(overflow, "render_tiles_autograd");
 
         return {rgb, alpha};
     }
 
     // EN: Placeholder autograd backward returning null grads for this path.
-    // KO: 현재 경로에서 null gradient를 반환하는 placeholder autograd backward입니다.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -3699,6 +4503,7 @@ public:
             torch::Tensor(), // rays_d (doesn't require grad)
             torch::Tensor(), // positions
             torch::Tensor(), // log_scales
+            torch::Tensor(), // quats
             torch::Tensor(), // culled_prim_indices (doesn't require grad)
             torch::Tensor(), // tile_offsets (doesn't require grad)
             torch::Tensor(), // freq_bands (doesn't require grad)
@@ -3721,7 +4526,6 @@ public:
 class RenderTilesCUDATileCenterOrder : public torch::autograd::Function<RenderTilesCUDATileCenterOrder> {
 public:
     // EN: Autograd forward entry for tile-center ordered renderer.
-    // KO: 타일 중심 순서 렌더러의 autograd forward 진입점입니다.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -3741,12 +4545,13 @@ public:
         double threshold)
     {
         // This kernel uses a CUB BlockRadixSort specialization that assumes 256 threads per block.
-        TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+        TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
 
         TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
         TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
         TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
         TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==2 && log_scales.size(1)==3);
+        TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
         TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
         TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
         TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
@@ -3754,6 +4559,9 @@ public:
 
         const int64_t B = rays_o.size(0);
         TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+        validate_tile_candidate_capacity(
+            culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+            "render_tiles_autograd_tilecenter");
 
         const int64_t N = positions.size(0);
         const int64_t Hh = W2.size(1);
@@ -3766,7 +4574,7 @@ public:
         auto alpha = torch::zeros({B, 1}, opts_f);
 
         // Tile-center order kernel uses a 1D block (TW*TH threads) so CUB block primitives work correctly.
-        dim3 block((unsigned)(TW * TH), 1, 1);
+        dim3 block(256, 1, 1);
         dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
         const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
@@ -3797,7 +4605,6 @@ public:
     }
 
     // EN: Placeholder autograd backward for tile-center ordered forward.
-    // KO: 타일 중심 순서 forward용 placeholder autograd backward입니다.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -3807,6 +4614,7 @@ public:
             torch::Tensor(), // rays_d
             torch::Tensor(), // positions
             torch::Tensor(), // log_scales
+            torch::Tensor(), // quats
             torch::Tensor(), // culled_prim_indices
             torch::Tensor(), // tile_offsets
             torch::Tensor(), // freq_bands
@@ -3829,8 +4637,6 @@ public:
 class RenderTilesCUDATileCenterPresorted : public torch::autograd::Function<RenderTilesCUDATileCenterPresorted> {
 public:
     // EN: Autograd forward entry for tile-center renderer with pre-sorted lists.
-    // KO: 사전 정렬 리스트를 사용하는 타일 중심 렌더러의 autograd forward 진입점입니다.
-    // 그냥 랩퍼 함수일 뿐으로 보인다. The only effective kernel for tilecenter_split mode.
     static torch::autograd::variable_list forward(
         torch::autograd::AutogradContext *ctx,
         torch::Tensor rays_o,
@@ -3873,7 +4679,7 @@ public:
         auto rgb = torch::zeros({B, 3}, opts_f);
         auto alpha = torch::zeros({B, 1}, opts_f);
 
-        dim3 block((unsigned)(TW * TH), 1, 1);
+        dim3 block(256, 1, 1);
         dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
         const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
@@ -3904,8 +4710,7 @@ public:
     }
 
     // EN: Placeholder autograd backward for presorted tile-center forward.
-    // KO: presorted 타일 중심 forward용 placeholder autograd backward입니다.
-    // Backward 따로 구현 안 돼 있는거 같은데, 우리 backward는 그렇다면 어디에? -- cumodel.py에서 따로 부르는 함수를 찾을 수 있다.
+    // Gradient rendering is invoked explicitly from cumodel.py.
     static torch::autograd::variable_list backward(
         torch::autograd::AutogradContext *ctx,
         torch::autograd::variable_list grad_outputs)
@@ -3936,7 +4741,6 @@ public:
 };
 
 // EN: Python-exposed wrapper calling single-pass autograd apply.
-// KO: single-pass autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -3962,7 +4766,6 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_wrapper(
 }
 
 // EN: Python-exposed wrapper calling tile-center-order autograd apply.
-// KO: tile-center-order autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -3988,7 +4791,6 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_wrappe
 }
 
 // EN: Python-exposed wrapper calling presorted tile-center autograd apply.
-// KO: presorted tile-center autograd apply를 호출하는 Python 노출용 래퍼 함수입니다.
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_presorted_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -4014,7 +4816,6 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_autograd_tilecenter_presor
 }
 
 // EN: Forward-only Python wrapper for per-pixel sorted renderer (no autograd).
-// KO: 픽셀별 정렬 렌더러의 forward 전용 Python 래퍼입니다(autograd 없음).
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -4044,6 +4845,9 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+        "render_tiles_forward");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -4055,6 +4859,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     auto opts_f = rays_o.options().dtype(at::kFloat);
     auto rgb = torch::zeros({B, 3}, opts_f);
     auto alpha = torch::zeros({B, 1}, opts_f);
+    auto overflow = torch::zeros({1}, rays_o.options().dtype(at::kInt));
 
     dim3 block((unsigned)TW, (unsigned)TH, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
@@ -4075,13 +4880,104 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
         (int)N, (int)Hh, (int)IN,
         (int)Wimg, (int)Himg, (int)TW, (int)TH,
         (float)threshold,
-        rgb.data_ptr<float>(), alpha.data_ptr<float>());
+        rgb.data_ptr<float>(), alpha.data_ptr<float>(),
+        overflow.data_ptr<int32_t>());
     AT_CUDA_CHECK(cudaGetLastError());
+    check_per_pixel_intersection_overflow(overflow, "render_tiles_forward");
     return {rgb, alpha};
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_per_pixel_with_feat_wrapper(
+    torch::Tensor rays_o,
+    torch::Tensor rays_d,
+    torch::Tensor positions,
+    torch::Tensor log_scales,
+    torch::Tensor quats,
+    torch::Tensor culled_prim_indices,
+    torch::Tensor tile_offsets,
+    torch::Tensor freq_bands,
+    torch::Tensor attenuation,
+    torch::Tensor W1, torch::Tensor b1,
+    torch::Tensor W2, torch::Tensor b2,
+    torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor feat_attr,
+    double gating_beta,
+    double gating_temp,
+    int64_t Wimg, int64_t Himg,
+    int64_t TW, int64_t TH,
+    double threshold)
+{
+    TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+    TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+    TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+    TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==2 && log_scales.size(1)==3);
+    TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
+    TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+    TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+    TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+    TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && (feat_attr.dim()==2 || feat_attr.dim()==3));
+
+    const int64_t B = rays_o.size(0);
+    TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+        "render_tiles_forward_per_pixel_with_feat");
+
+    const int64_t N = positions.size(0);
+    const int64_t Hh = W2.size(1);
+    const int64_t IN = W1.size(2);
+    const int64_t F = freq_bands.size(0);
+    TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+    TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
+
+    int64_t feat_slots = 1;
+    int64_t Cfeat = 0;
+    if (feat_attr.dim() == 2) {
+      Cfeat = feat_attr.size(1);
+    } else {
+      feat_slots = feat_attr.size(1);
+      Cfeat = feat_attr.size(2);
+      TORCH_CHECK(feat_slots == 4 || feat_slots == 5, "3D feat_attr expects slots in {4,5}");
+    }
+    TORCH_CHECK(Cfeat > 0, "feat_attr feature dimension must be positive");
+    TORCH_CHECK(Cfeat <= 512, "feat_attr feature dimension must be <= 512");
+
+    auto opts_f = rays_o.options().dtype(at::kFloat);
+    auto rgb = torch::zeros({B, 3}, opts_f);
+    auto alpha = torch::zeros({B, 1}, opts_f);
+    auto feat = torch::zeros({B, Cfeat}, opts_f);
+    auto overflow = torch::zeros({1}, rays_o.options().dtype(at::kInt));
+
+    dim3 block((unsigned)TW, (unsigned)TH, 1);
+    dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+    render_tiles_kernel_with_sort_and_feat<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        quats.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        W1.data_ptr<float>(), b1.data_ptr<float>(),
+        W2.data_ptr<float>(), b2.data_ptr<float>(),
+        W3.data_ptr<float>(), b3.data_ptr<float>(),
+        feat_attr.data_ptr<float>(), (int)feat_slots, (int)Cfeat,
+        (float)gating_beta, (float)gating_temp,
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        rgb.data_ptr<float>(), alpha.data_ptr<float>(), feat.data_ptr<float>(),
+        overflow.data_ptr<int32_t>());
+    AT_CUDA_CHECK(cudaGetLastError());
+    check_per_pixel_intersection_overflow(overflow, "render_tiles_forward_per_pixel_with_feat");
+    return {rgb, alpha, feat};
+}
+
 // EN: Forward-only Python wrapper for tile-center ordered renderer (dtype-dispatched).
-// KO: 타일 중심 순서 렌더러의 forward 전용 Python 래퍼입니다(dtype 분기 지원).
 std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -4099,7 +4995,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -4123,6 +5019,9 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_forward_tilecenter");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -4134,7 +5033,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     auto rgb = torch::zeros({B, 3}, opts_f);
     auto alpha = torch::zeros({B, 1}, opts_f);
 
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
     const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
@@ -4219,7 +5118,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_stats_w
     torch::Tensor stat_sum_werr,              // ✅ NEW: (N) float cuda
     torch::Tensor stat_contrib_count          // ✅ NEW: (N) int32 cuda
 ){
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -4247,11 +5146,15 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_stats_w
     TORCH_CHECK(stat_sum_werr.is_cuda() && stat_sum_werr.dtype()==at::kFloat && stat_sum_werr.numel()==N);
     TORCH_CHECK(stat_contrib_count.is_cuda() && stat_contrib_count.dtype()==at::kInt && stat_contrib_count.numel()==N);
 
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_forward_tilecenter_stats");
+
     auto out_rgb = torch::empty({Himg * Wimg, 3}, torch::TensorOptions().device(rays_o.device()).dtype(torch::kFloat));
     auto out_alpha = torch::empty({Himg * Wimg, 1}, torch::TensorOptions().device(rays_o.device()).dtype(torch::kFloat));
 
     dim3 grid((Wimg + TW - 1) / TW, (Himg + TH - 1) / TH);
-    dim3 block(TW * TH);
+    dim3 block(256);
 
     const int Hcap = (H > 64) ? 64 : H;
     const int total_floats = Hcap * IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
@@ -4310,11 +5213,13 @@ __global__ void render_tiles_kernel_tilecenter_order_with_t(
   const int tile_y = blockIdx.y;
   // Use a 1D block of (TW*TH) threads so CUB block primitives can be used safely.
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -4359,8 +5264,8 @@ __global__ void render_tiles_kernel_tilecenter_order_with_t(
     return;
   }
 
-  // Block-level radix sort assumes a fixed block size (16x16 => 256 threads).
-  // `cumodel.py` currently uses tile_size=16, so this holds for normal use.
+  // Block-level radix sort uses a fixed 256-thread block; only the first TW*TH threads map to pixels
+  // while the remaining threads participate in sort/staging work.
   constexpr int MAX_TILE_PRIMS = 512;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
@@ -4370,7 +5275,7 @@ __global__ void render_tiles_kernel_tilecenter_order_with_t(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   // Load tile list + compute key on tile-center ray, then radix-sort by key (ascending).
@@ -4584,7 +5489,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -4596,6 +5501,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_forward_tilecenter_with_t");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -4608,7 +5516,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     auto alpha = torch::zeros({B, 1}, opts_f);
     auto t     = torch::zeros({B, 1}, opts_f);
 
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
     const int Hcap = (int)(Hh > 64 ? 64 : Hh);
@@ -4653,7 +5561,10 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
     const float* __restrict__ W2, const float* __restrict__ b2,
     const float* __restrict__ W3, const float* __restrict__ b3,
     const float* __restrict__ feat_attr,
+    const int feat_slots,
     const int Cfeat,
+    const float gating_beta,
+    const float gating_temp,
     const int N, const int H, const int IN,
     const int Wimg, const int Himg, const int TW, const int TH,
     const float thr,
@@ -4664,11 +5575,13 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
   const int tid = (int)threadIdx.x;
-  const int lx = tid % TW;
-  const int ly = tid / TW;
+  const int tile_threads = TW * TH;
+  const bool in_tile_thread = (tid < tile_threads);
+  const int lx = in_tile_thread ? (tid % TW) : 0;
+  const int ly = in_tile_thread ? (tid / TW) : 0;
   const int x = tile_x * TW + lx;
   const int y = tile_y * TH + ly;
-  const bool valid_pix = (x < Wimg) && (y < Himg);
+  const bool valid_pix = in_tile_thread && (x < Wimg) && (y < Himg);
   const int pix = valid_pix ? (y * Wimg + x) : 0;
 
   const int num_tiles_x = (Wimg + TW - 1) / TW;
@@ -4718,7 +5631,7 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
   __shared__ typename BlockRadixSortT::TempStorage sort_storage;
 
-  const int num_threads = TW * TH;
+  const int num_threads = (int)blockDim.x;
   const int load_n = tile_len < MAX_TILE_PRIMS ? tile_len : MAX_TILE_PRIMS;
 
   float keys[ITEMS_PER_THREAD];
@@ -4874,9 +5787,47 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
         C.x = fmaf(w, R, C.x);
         C.y = fmaf(w, G, C.y);
         C.z = fmaf(w, Bc, C.z);
+
         float* dst_feat = out_feat + (size_t)pix * Cfeat;
-        const float* src_feat = feat_attr + (size_t)p * Cfeat;
-        for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+        if (feat_slots <= 1) {
+          const float* src_feat = feat_attr + (size_t)p * Cfeat;
+          for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+        } else if (feat_slots == 5) {
+          float g0, g1, g2, g3;
+          semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+          const float* base = feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+          const float* d0 = feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+          const float* d1 = feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+          const float* d2 = feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+          const float* d3 = feat_attr + ((size_t)p * feat_slots + 4) * Cfeat;
+          for (int c = 0; c < Cfeat; ++c) {
+            float mix = base[c];
+            mix = fmaf(g0, d0[c], mix);
+            mix = fmaf(g1, d1[c], mix);
+            mix = fmaf(g2, d2[c], mix);
+            mix = fmaf(g3, d3[c], mix);
+            dst_feat[c] = fmaf(w, mix, dst_feat[c]);
+          }
+        } else if (feat_slots == 4) {
+          float g0, g1, g2, g3;
+          semantic_tetra_gates(qlx, qly, qlz, lgx, lgy, lgz, gating_beta, gating_temp, g0, g1, g2, g3);
+          const float* s0 = feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+          const float* s1 = feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+          const float* s2 = feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+          const float* s3 = feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+          for (int c = 0; c < Cfeat; ++c) {
+            float mix = 0.f;
+            mix = fmaf(g0, s0[c], mix);
+            mix = fmaf(g1, s1[c], mix);
+            mix = fmaf(g2, s2[c], mix);
+            mix = fmaf(g3, s3[c], mix);
+            dst_feat[c] = fmaf(w, mix, dst_feat[c]);
+          }
+        } else {
+          // Fallback for unsupported slot counts: use the first slot.
+          const float* src_feat = feat_attr + (size_t)p * feat_slots * Cfeat;
+          for (int c = 0; c < Cfeat; ++c) dst_feat[c] = fmaf(w, src_feat[c], dst_feat[c]);
+        }
         trans *= (1.f - alpha);
       }
     }
@@ -4929,11 +5880,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     torch::Tensor W2, torch::Tensor b2,
     torch::Tensor W3, torch::Tensor b3,
     torch::Tensor feat_attr,
+    double gating_beta,
+    double gating_temp,
     int64_t Wimg, int64_t Himg,
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK((int)TW == 16 && (int)TH == 16, "Tile-center order kernel currently requires TW==16 and TH==16");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -4943,10 +5896,13 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
     TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
     TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
-    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && feat_attr.dim()==2);
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && (feat_attr.dim()==2 || feat_attr.dim()==3));
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_forward_tilecenter_with_feat");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -4954,16 +5910,24 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     const int64_t F = freq_bands.size(0);
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
     TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
-    const int64_t Cfeat = feat_attr.size(1);
-    TORCH_CHECK(Cfeat > 0, "feat_attr second dimension must be positive");
-    TORCH_CHECK(Cfeat <= 512, "feat_attr second dimension must be <= 512");
+    int64_t feat_slots = 1;
+    int64_t Cfeat = 0;
+    if (feat_attr.dim() == 2) {
+      Cfeat = feat_attr.size(1);
+    } else {
+      feat_slots = feat_attr.size(1);
+      Cfeat = feat_attr.size(2);
+      TORCH_CHECK(feat_slots == 4 || feat_slots == 5, "3D feat_attr expects slots in {4,5}");
+    }
+    TORCH_CHECK(Cfeat > 0, "feat_attr feature dimension must be positive");
+    TORCH_CHECK(Cfeat <= 512, "feat_attr feature dimension must be <= 512");
 
     auto opts_f = rays_o.options().dtype(at::kFloat);
     auto rgb   = torch::zeros({B, 3}, opts_f);
     auto alpha = torch::zeros({B, 1}, opts_f);
     auto feat  = torch::zeros({B, Cfeat}, opts_f);
 
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     const int Hcap = (int)(Hh > 64 ? 64 : Hh);
     const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
@@ -4983,7 +5947,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
         W1.data_ptr<float>(), b1.data_ptr<float>(),
         W2.data_ptr<float>(), b2.data_ptr<float>(),
         W3.data_ptr<float>(), b3.data_ptr<float>(),
-        feat_attr.data_ptr<float>(), (int)Cfeat,
+        feat_attr.data_ptr<float>(), (int)feat_slots, (int)Cfeat,
+        (float)gating_beta, (float)gating_temp,
         (int)N, (int)Hh, (int)IN,
         (int)Wimg, (int)Himg, (int)TW, (int)TH,
         (float)threshold,
@@ -4993,7 +5958,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
 }
 
 // EN: Python wrapper for backward count prepass in per-pixel traversal.
-// KO: 픽셀별 순회 방식 backward 카운트 사전 패스용 Python 래퍼입니다.
 torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -5023,6 +5987,9 @@ torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+        "render_tiles_backward_count_per_pixel");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -5031,6 +5998,7 @@ torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
 
     auto counts = torch::zeros({B}, rays_o.options().dtype(at::kInt));
+    auto overflow = torch::zeros({1}, rays_o.options().dtype(at::kInt));
     dim3 block((unsigned)TW, (unsigned)TH, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_count_per_pixel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -5050,13 +6018,14 @@ torch::Tensor render_tiles_backward_count_per_pixel_wrapper(
         (int)N, (int)Hh, (int)IN,
         (int)Wimg, (int)Himg, (int)TW, (int)TH,
         (float)threshold,
-        counts.data_ptr<int32_t>());
+        counts.data_ptr<int32_t>(),
+        overflow.data_ptr<int32_t>());
     AT_CUDA_CHECK(cudaGetLastError());
+    check_per_pixel_intersection_overflow(overflow, "render_tiles_backward_count_per_pixel");
     return counts;
 }
 
 // EN: Python wrapper for backward count prepass in tile-center traversal.
-// KO: 타일 중심 순회 방식 backward 카운트 사전 패스용 Python 래퍼입니다.
 torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -5074,7 +6043,7 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5086,6 +6055,11 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    // This legacy count path has a smaller per-pixel MAX_HITS than the current
+    // full tilecenter backward, so its conservative candidate cap is 256.
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 256,
+        "render_tiles_backward_count_tilecenter");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -5094,7 +6068,7 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
 
     auto counts = torch::zeros({B}, rays_o.options().dtype(at::kInt));
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_count_tilecenter<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -5119,8 +6093,7 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
 }
 
 // EN: Python wrapper for backward emit pass in per-pixel traversal.
-// KO: 픽셀별 순회 방식 backward emit 패스용 Python 래퍼입니다.
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_emit_per_pixel_wrapper(
     torch::Tensor rays_o,
     torch::Tensor rays_d,
@@ -5159,6 +6132,9 @@ render_tiles_backward_emit_per_pixel_wrapper(
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+        "render_tiles_backward_emit_per_pixel");
     TORCH_CHECK(grad_T_end.numel() == B, "grad_T_end must have size B");
     TORCH_CHECK(counts.numel() == B, "counts must have size B");
     TORCH_CHECK(offsets.numel() == B, "offsets must have size B");
@@ -5177,6 +6153,8 @@ render_tiles_backward_emit_per_pixel_wrapper(
     auto out_grad_sigma_raw = torch::zeros({total_records, 1}, opts_f);
     auto grad_positions = torch::zeros({N, 3}, opts_f);
     auto grad_log_scales = torch::zeros({N, 3}, opts_f);
+    auto grad_quats = torch::zeros({N, 4}, opts_f);
+    auto overflow = torch::zeros({1}, opts_i);
     dim3 block((unsigned)TW, (unsigned)TH, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_emit_per_pixel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -5205,13 +6183,15 @@ render_tiles_backward_emit_per_pixel_wrapper(
         out_grad_rgb.data_ptr<float>(),
         out_grad_sigma_raw.data_ptr<float>(),
         grad_positions.data_ptr<float>(),
-        grad_log_scales.data_ptr<float>());
+        grad_log_scales.data_ptr<float>(),
+        grad_quats.data_ptr<float>(),
+        overflow.data_ptr<int32_t>());
     AT_CUDA_CHECK(cudaGetLastError());
-    return {out_prim_id, out_x6, out_grad_rgb, out_grad_sigma_raw, grad_positions, grad_log_scales};
+    check_per_pixel_intersection_overflow(overflow, "render_tiles_backward_emit_per_pixel");
+    return {out_prim_id, out_x6, out_grad_rgb, out_grad_sigma_raw, grad_positions, grad_log_scales, grad_quats};
 }
 
 // EN: Python wrapper for backward emit pass in tile-center traversal.
-// KO: 타일 중심 순회 방식 backward emit 패스용 Python 래퍼입니다.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_emit_tilecenter_wrapper(
     torch::Tensor rays_o,
@@ -5235,7 +6215,7 @@ render_tiles_backward_emit_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5251,6 +6231,9 @@ render_tiles_backward_emit_tilecenter_wrapper(
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_backward_emit_tilecenter");
     TORCH_CHECK(grad_T_end.numel() == B, "grad_T_end must have size B");
     TORCH_CHECK(counts.numel() == B, "counts must have size B");
     TORCH_CHECK(offsets.numel() == B, "offsets must have size B");
@@ -5270,7 +6253,7 @@ render_tiles_backward_emit_tilecenter_wrapper(
     auto grad_positions = torch::zeros({N, 3}, opts_f);
     auto grad_log_scales = torch::zeros({N, 3}, opts_f);
 
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_emit_tilecenter<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -5316,12 +6299,15 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     torch::Tensor W1, torch::Tensor b1,
     torch::Tensor W2, torch::Tensor b2,
     torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor feat_attr,
     torch::Tensor grad_out_feat,
+    double gating_beta,
+    double gating_temp,
     int64_t Wimg, int64_t Himg,
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5331,23 +6317,39 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
     TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
     TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && (feat_attr.dim()==2 || feat_attr.dim()==3));
     TORCH_CHECK(grad_out_feat.is_cuda() && grad_out_feat.dtype()==at::kFloat && grad_out_feat.dim()==2);
 
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
     TORCH_CHECK(grad_out_feat.size(0) == B, "grad_out_feat must have shape (B, Cfeat)");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_backward_featattr_tilecenter");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
     const int64_t IN = W1.size(2);
     const int64_t F = freq_bands.size(0);
     TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
-    const int64_t Cfeat = grad_out_feat.size(1);
+    TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
+    int64_t feat_slots = 1;
+    int64_t Cfeat = 0;
+    if (feat_attr.dim() == 2) {
+      Cfeat = feat_attr.size(1);
+    } else {
+      feat_slots = feat_attr.size(1);
+      Cfeat = feat_attr.size(2);
+      TORCH_CHECK(feat_slots == 4 || feat_slots == 5, "3D feat_attr expects slots in {4,5}");
+    }
+    TORCH_CHECK(grad_out_feat.size(1) == Cfeat, "grad_out_feat feature dim must match feat_attr");
     TORCH_CHECK(Cfeat > 0, "grad_out_feat second dimension must be positive");
     TORCH_CHECK(Cfeat <= 512, "grad_out_feat second dimension must be <= 512");
 
-    auto grad_feat_attr = torch::zeros({N, Cfeat}, rays_o.options().dtype(at::kFloat));
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    auto grad_feat_attr = (feat_slots == 1)
+        ? torch::zeros({N, Cfeat}, rays_o.options().dtype(at::kFloat))
+        : torch::zeros({N, feat_slots, Cfeat}, rays_o.options().dtype(at::kFloat));
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_featattr_tilecenter<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -5367,14 +6369,111 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
         (int)Wimg, (int)Himg, (int)TW, (int)TH,
         (float)threshold,
         grad_out_feat.data_ptr<float>(),
+        (int)feat_slots,
         (int)Cfeat,
+        (float)gating_beta,
+        (float)gating_temp,
         grad_feat_attr.data_ptr<float>());
     AT_CUDA_CHECK(cudaGetLastError());
     return grad_feat_attr;
 }
 
+torch::Tensor render_tiles_backward_featattr_per_pixel_wrapper(
+    torch::Tensor rays_o,
+    torch::Tensor rays_d,
+    torch::Tensor positions,
+    torch::Tensor log_scales,
+    torch::Tensor quats,
+    torch::Tensor culled_prim_indices,
+    torch::Tensor tile_offsets,
+    torch::Tensor freq_bands,
+    torch::Tensor attenuation,
+    torch::Tensor W1, torch::Tensor b1,
+    torch::Tensor W2, torch::Tensor b2,
+    torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor feat_attr,
+    torch::Tensor grad_out_feat,
+    double gating_beta,
+    double gating_temp,
+    int64_t Wimg, int64_t Himg,
+    int64_t TW, int64_t TH,
+    double threshold)
+{
+    TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+    TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+    TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+    TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==2 && log_scales.size(1)==3);
+    TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
+    TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+    TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+    TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+    TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && (feat_attr.dim()==2 || feat_attr.dim()==3));
+    TORCH_CHECK(grad_out_feat.is_cuda() && grad_out_feat.dtype()==at::kFloat && grad_out_feat.dim()==2);
+
+    const int64_t B = rays_o.size(0);
+    TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
+    TORCH_CHECK(grad_out_feat.size(0) == B, "grad_out_feat must have shape (B, Cfeat)");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, 0,
+        "render_tiles_backward_featattr_per_pixel");
+
+    const int64_t N = positions.size(0);
+    const int64_t Hh = W2.size(1);
+    const int64_t IN = W1.size(2);
+    const int64_t F = freq_bands.size(0);
+    TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+    TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
+    int64_t feat_slots = 1;
+    int64_t Cfeat = 0;
+    if (feat_attr.dim() == 2) {
+      Cfeat = feat_attr.size(1);
+    } else {
+      feat_slots = feat_attr.size(1);
+      Cfeat = feat_attr.size(2);
+      TORCH_CHECK(feat_slots == 4 || feat_slots == 5, "3D feat_attr expects slots in {4,5}");
+    }
+    TORCH_CHECK(grad_out_feat.size(1) == Cfeat, "grad_out_feat feature dim must match feat_attr");
+    TORCH_CHECK(Cfeat > 0, "grad_out_feat second dimension must be positive");
+    TORCH_CHECK(Cfeat <= 512, "grad_out_feat second dimension must be <= 512");
+
+    auto grad_feat_attr = (feat_slots == 1)
+        ? torch::zeros({N, Cfeat}, rays_o.options().dtype(at::kFloat))
+        : torch::zeros({N, feat_slots, Cfeat}, rays_o.options().dtype(at::kFloat));
+    auto overflow = torch::zeros({1}, rays_o.options().dtype(at::kInt));
+
+    dim3 block((unsigned)TW, (unsigned)TH, 1);
+    dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+    render_tiles_backward_featattr_per_pixel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(),
+        rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(),
+        log_scales.data_ptr<float>(),
+        quats.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(),
+        tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(),
+        attenuation.data_ptr<float>(),
+        (int)F,
+        W1.data_ptr<float>(), b1.data_ptr<float>(),
+        W2.data_ptr<float>(), b2.data_ptr<float>(),
+        W3.data_ptr<float>(), b3.data_ptr<float>(),
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH,
+        (float)threshold,
+        grad_out_feat.data_ptr<float>(),
+        (int)feat_slots,
+        (int)Cfeat,
+        (float)gating_beta,
+        (float)gating_temp,
+        grad_feat_attr.data_ptr<float>(),
+        overflow.data_ptr<int32_t>());
+    AT_CUDA_CHECK(cudaGetLastError());
+    check_per_pixel_intersection_overflow(overflow, "render_tiles_backward_featattr_per_pixel");
+    return grad_feat_attr;
+}
+
 // EN: Python wrapper for full tile-center backward where CUDA computes MLP grads directly.
-// KO: CUDA에서 MLP gradient를 직접 계산하는 full tile-center backward용 Python 래퍼입니다.
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 render_tiles_backward_tilecenter_full_wrapper(
     torch::Tensor rays_o,
@@ -5395,7 +6494,7 @@ render_tiles_backward_tilecenter_full_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) == 256, "Tile-center order kernel currently requires TW*TH==256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5422,6 +6521,9 @@ render_tiles_backward_tilecenter_full_wrapper(
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
     TORCH_CHECK(grad_T_end.numel() == B, "grad_T_end must have size B");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_backward_tilecenter_full");
 
     const int64_t N = positions.size(0);
     const int64_t Hh = W2.size(1);
@@ -5440,7 +6542,7 @@ render_tiles_backward_tilecenter_full_wrapper(
     auto grad_log_scales = torch::zeros({N, 3}, opts_f);
     auto grad_quats = torch::zeros({N,4}, opts_f);
 
-    dim3 block((unsigned)(TW * TH), 1, 1);
+    dim3 block(256, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     if (W1.scalar_type() == at::kFloat) {
       render_tiles_backward_tilecenter_full<float><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -5538,6 +6640,9 @@ render_tiles_backward_tilecenter_traversal_wrapper(
     int64_t Wimg, int64_t Himg, int64_t TW, int64_t TH,
     double thr)
 {
+  validate_tile_candidate_capacity(
+      culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+      "render_tiles_backward_tilecenter_traversal");
   const auto opts_i = torch::TensorOptions().dtype(torch::kInt32).device(rays_o.device());
   const auto opts_f = torch::TensorOptions().dtype(torch::kFloat32).device(rays_o.device());
   auto out_used = torch::zeros({Himg * Wimg}, opts_i);
@@ -5550,7 +6655,7 @@ render_tiles_backward_tilecenter_traversal_wrapper(
   TORCH_CHECK(Hh <= MLPSP_MAX_H, "render_tiles_backward_tilecenter_backprop_noatomic currently supports hidden_dim <= MLPSP_MAX_H");
 
   const dim3 grid((unsigned)((Wimg + TW - 1) / TW), (unsigned)((Himg + TH - 1) / TH), 1);
-  const dim3 block((unsigned)(TW * TH), 1, 1);
+  const dim3 block(256, 1, 1);
   render_tiles_backward_tilecenter_traversal<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
       rays_o.data_ptr<float>(),
       rays_d.data_ptr<float>(),
@@ -5574,7 +6679,6 @@ render_tiles_backward_tilecenter_traversal_wrapper(
 }
 
 // EN: Python wrapper for backprop-only tile-center profiling kernel (no atomics).
-// KO: backprop 전용 타일 중심 프로파일링 커널용 Python 래퍼 함수입니다(atomic 없음).
 torch::Tensor
 render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
     torch::Tensor rays_o, torch::Tensor rays_d,
@@ -5589,6 +6693,9 @@ render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
     int64_t Wimg, int64_t Himg, int64_t TW, int64_t TH,
     double thr)
 {
+  validate_tile_candidate_capacity(
+      culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+      "render_tiles_backward_tilecenter_backprop_noatomic");
   auto opts_f = rays_o.options().dtype(at::kFloat);
   auto out_sink = torch::zeros({Himg * Wimg}, opts_f);
 
@@ -5598,7 +6705,7 @@ render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
   const int64_t F = freq_bands.size(0);
 
   const dim3 grid((unsigned)((Wimg + TW - 1) / TW), (unsigned)((Himg + TH - 1) / TH), 1);
-  const dim3 block((unsigned)(TW * TH), 1, 1);
+  const dim3 block(256, 1, 1);
   render_tiles_backward_tilecenter_backprop_noatomic<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
       rays_o.data_ptr<float>(),
       rays_d.data_ptr<float>(),
@@ -5623,12 +6730,12 @@ render_tiles_backward_tilecenter_backprop_noatomic_wrapper(
 }
 
 // EN: Binds CUDA wrapper functions into the Python extension module.
-// KO: CUDA 래퍼 함수들을 Python 확장 모듈에 바인딩합니다.
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("render_tiles_autograd", &render_tiles_autograd_wrapper, "Tile single-pass MLP splatting (autograd ready)");
-  m.def("render_tiles_autograd_tilecenter", &render_tiles_autograd_tilecenter_wrapper, "Tile MLP splatting (tile-center order, prim-major, shared weight staging)");
+  m.def("render_tiles_autograd", &render_tiles_autograd_wrapper, "Legacy tile forward; parameter gradients are not implemented");
+  m.def("render_tiles_autograd_tilecenter", &render_tiles_autograd_tilecenter_wrapper, "Legacy tile-center forward; parameter gradients are not implemented");
   m.def("render_tiles_autograd_tilecenter_presorted", &render_tiles_autograd_tilecenter_presorted_wrapper, "Tile MLP splatting (prim-major, presorted per-tile list; intended for globaldepth ordering)");
   m.def("render_tiles_forward", &render_tiles_forward_wrapper, "Tile splatting forward (per-pixel sort, no autograd)");
+  m.def("render_tiles_forward_per_pixel_with_feat", &render_tiles_forward_per_pixel_with_feat_wrapper, "Tile splatting forward (per-pixel sort, no autograd, with rendered feature map)");
   m.def("render_tiles_forward_tilecenter", &render_tiles_forward_tilecenter_wrapper, "Tile splatting forward (tile-center order, no autograd)");
   m.def("render_tiles_forward_tilecenter_stats", &render_tiles_forward_tilecenter_stats_wrapper, "Tilecenter forward (no-grad) with stats.");
   m.def("render_tiles_forward_tilecenter_with_t", &render_tiles_forward_tilecenter_with_t_wrapper, "Tile splatting forward (tile-center order, no autograd, with expected depth t)");
@@ -5637,8 +6744,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("render_tiles_backward_count_tilecenter", &render_tiles_backward_count_tilecenter_wrapper, "Tile splatting backward count (tilecenter)");
   m.def("render_tiles_backward_emit_per_pixel", &render_tiles_backward_emit_per_pixel_wrapper, "Tile splatting backward emit (per-pixel)");
   m.def("render_tiles_backward_emit_tilecenter", &render_tiles_backward_emit_tilecenter_wrapper, "Tile splatting backward emit (tilecenter)");
+  m.def("render_tiles_backward_featattr_per_pixel", &render_tiles_backward_featattr_per_pixel_wrapper, "Tile splatting backward feat_attr-only (per-pixel)");
   m.def("render_tiles_backward_featattr_tilecenter", &render_tiles_backward_featattr_tilecenter_wrapper, "Tile splatting backward feat_attr-only (tilecenter)");
   m.def("render_tiles_backward_tilecenter_full", &render_tiles_backward_tilecenter_full_wrapper, "Tile splatting backward full (tilecenter, MLP grads in CUDA)");
   m.def("render_tiles_backward_tilecenter_traversal", &render_tiles_backward_tilecenter_traversal_wrapper, "Tile splatting backward traversal-only (tilecenter profiling)");
   m.def("render_tiles_backward_tilecenter_backprop_noatomic", &render_tiles_backward_tilecenter_backprop_noatomic_wrapper, "Tile splatting backward backprop-only (tilecenter profiling, no atomics)");
+  m.def("_test_atomic_add_warp_agg", &test_atomic_add_warp_agg_wrapper, "Internal sparse-peer warp atomic test hook");
 }

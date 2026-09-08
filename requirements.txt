@@ -1,9 +1,7 @@
-dearpygui==2.0.0
-imageio==2.37.0
-matplotlib==3.10.0
-numpy==2.3.0
-scipy==1.15.3
-tqdm==4.67.1
-
-torch==2.9.0.dev20250630+cu128
-torchvision==0.23.0.dev20250630+cu128
+numpy>=1.24
+imageio>=2.31
+Pillow>=9.5
+tqdm>=4.65
+torch>=2.4
+torchvision>=0.19
+ninja>=1.11
