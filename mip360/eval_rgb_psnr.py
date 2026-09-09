@@ -24,9 +24,11 @@ import torch.nn.functional as F
 try:
     from .utils.loss_utils import ssim
     from .checkpoints import infer_scene_spec, normalize_scene_state_dict, split_checkpoint
+    from .config import parse_args_with_config
 except ImportError:  # Support direct script execution.
     from utils.loss_utils import ssim
     from checkpoints import infer_scene_spec, normalize_scene_state_dict, split_checkpoint
+    from config import parse_args_with_config
 
 
 def _strip_state_dict_prefixes(state_dict: dict) -> dict:
@@ -314,44 +316,66 @@ def _build_lpips_model(net: str, device: torch.device):
     return model
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Evaluate RGB metrics (PSNR/SSIM/LPIPS) for tile-cuda checkpoints.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--data_dir", type=str, required=True, help="Scene directory.")
-    parser.add_argument("--scene_ckpt", type=str, required=True, help="Path to scene_epoch_xxx.pt or train_state_xxx.pt.")
-    parser.add_argument("--dataset_loader", type=str, default="replica", choices=["replica", "mip360"], help="Dataset loader implementation.")
+    parser.add_argument(
+        "--config",
+        help="Versioned JSON recipe. Command-line values override its defaults.",
+    )
+    parser.add_argument("--data", "--data-dir", "--data_dir", dest="data_dir", type=str, required=True, help="Scene directory.")
+    parser.add_argument(
+        "--checkpoint", "--scene-ckpt", "--scene_ckpt", dest="scene_ckpt",
+        type=str, required=True,
+        help="Path to scene_epoch_xxx.pt or train_state_xxx.pt.",
+    )
+    parser.add_argument("--dataset", "--dataset-loader", "--dataset_loader", dest="dataset_loader", type=str, default="replica", choices=["replica", "mip360"], help="Dataset loader implementation.")
     parser.add_argument("--split", type=str, default="test", choices=["train", "test"], help="Dataset split to evaluate.")
     parser.add_argument("--factor", type=int, default=1, help="Image downsample factor used by dataset loader.")
     parser.add_argument("--llffhold", type=int, default=8, help="Train/test split period.")
-    parser.add_argument("--split_mode", type=str, default="replica_feature3dgs", help="Split mode (e.g. llff/replica_feature3dgs).")
-    parser.add_argument("--split_test_offset", type=int, default=None, help="Override split test offset if loader supports it.")
-    parser.add_argument("--ray_cache_size", type=int, default=8, help="Dataset ray cache size.")
-    parser.add_argument("--feature_cache_size", type=int, default=16, help="Dataset feature cache size (kept for loader compatibility).")
+    parser.add_argument("--split-mode", "--split_mode", dest="split_mode", type=str, default="replica_feature3dgs", help="Split mode (e.g. llff/replica_feature3dgs).")
+    parser.add_argument("--split-test-offset", "--split_test_offset", dest="split_test_offset", type=int, default=None, help="Override split test offset if loader supports it.")
+    parser.add_argument("--expected-views", dest="expected_views", type=int, default=0, help="Require exactly this many split views (0 disables the check).")
+    parser.add_argument("--ray-cache-size", "--ray_cache_size", dest="ray_cache_size", type=int, default=8, help="Dataset ray cache size.")
+    parser.add_argument("--feature-cache-size", "--feature_cache_size", dest="feature_cache_size", type=int, default=16, help="Dataset feature cache size (kept for loader compatibility).")
     parser.add_argument(
-        "--tile_order",
+        "--tile-order", "--tile_order", dest="tile_order",
         type=str,
         default="tilecenter",
         choices=["tilecenter", "per_pixel"],
         help="Tile traversal mode for renderer.",
     )
-    parser.add_argument("--score_threshold", type=float, default=3e-3, help="Tile renderer score threshold.")
-    parser.add_argument("--min_points", type=int, default=10, help="min_points used by scene constructor.")
-    parser.add_argument("--tile_size", type=int, default=8, choices=[8, 16], help="Tile pixel size used by scene constructor (must match training).")
-    parser.add_argument("--limit_frames", type=int, default=0, help="Evaluate first N frames only (0 means all).")
-    parser.add_argument("--warmup_frames", type=int, default=1, help="Initial frames excluded from FPS timing.")
-    parser.add_argument("--disable_lpips", action="store_true", help="Disable LPIPS computation.")
+    parser.add_argument("--score-threshold", "--score_threshold", dest="score_threshold", type=float, default=3e-3, help="Tile renderer score threshold.")
     parser.add_argument(
-        "--lpips_net",
+        "--max-points-per-leaf", "--min-points", "--min_points",
+        dest="max_points_per_leaf", type=int, default=10,
+        help="Training octree threshold m, recorded here for provenance.",
+    )
+    parser.add_argument("--tile-size", "--tile_size", dest="tile_size", type=int, default=8, choices=[8, 16], help="Tile pixel size used by scene constructor (must match training).")
+    parser.add_argument("--limit-frames", "--limit_frames", dest="limit_frames", type=int, default=0, help="Evaluate first N frames only (0 means all).")
+    parser.add_argument("--warmup-frames", "--warmup_frames", dest="warmup_frames", type=int, default=1, help="Initial frames excluded from FPS timing.")
+    parser.add_argument("--disable-lpips", "--disable_lpips", dest="disable_lpips", action="store_true", help="Disable LPIPS computation.")
+    parser.add_argument(
+        "--lpips-net", "--lpips_net", dest="lpips_net",
         type=str,
         default="vgg",
         choices=["alex", "vgg", "squeeze"],
         help="LPIPS backbone network.",
     )
-    parser.add_argument("--save_json", type=str, default="", help="Optional output JSON path.")
+    parser.add_argument("--output", "--save-json", "--save_json", dest="save_json", type=str, default="", help="Optional output JSON path.")
     parser.add_argument("--device", type=str, default="cuda", help="Device, e.g. cuda or cuda:0.")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parse_args_with_config(parser, argv, section="evaluation")
+    if args.expected_views < 0:
+        parser.error("--expected-views cannot be negative")
+    if args.max_points_per_leaf <= 0:
+        parser.error("--max-points-per-leaf must be positive")
 
     if not torch.cuda.is_available() and str(args.device).startswith("cuda"):
         raise RuntimeError("CUDA device requested but torch.cuda.is_available() is False.")
@@ -366,12 +390,17 @@ def main():
     dataset = _build_dataset(dataset_cls, args)
     if len(dataset) == 0:
         raise RuntimeError("Dataset split is empty.")
+    if int(args.expected_views) > 0 and len(dataset) != int(args.expected_views):
+        raise RuntimeError(
+            f"{args.split} split has {len(dataset)} views; expected {int(args.expected_views)}. "
+            "Check the dataset archive and split settings."
+        )
 
     scene_ckpt = os.path.abspath(args.scene_ckpt)
     scene = _load_scene_tile_cuda(
         scene_ckpt_path=scene_ckpt,
         device=device,
-        min_points=int(args.min_points),
+        min_points=int(args.max_points_per_leaf),
         tile_size=int(args.tile_size),
     )
     lpips_model = None if bool(args.disable_lpips) else _build_lpips_model(net=str(args.lpips_net), device=device)
@@ -533,7 +562,8 @@ def main():
         "factor": int(args.factor),
         "tile_order": str(args.tile_order),
         "tile_size": int(args.tile_size),
-        "min_points": int(args.min_points),
+        "max_points_per_leaf": int(args.max_points_per_leaf),
+        "config": args.config,
         "score_threshold": float(args.score_threshold),
         "lpips_enabled": bool(lpips_model is not None),
         "lpips_net": (None if lpips_model is None else str(args.lpips_net)),

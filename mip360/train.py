@@ -6,9 +6,7 @@ import math
 import os
 import re
 import threading
-import uuid
 from tqdm import tqdm
-from datetime import datetime
 import time
 from collections import OrderedDict, deque
 import torch
@@ -812,7 +810,14 @@ def _sample_tile_mosaic_batch(
 def train_scene_llff(
     data_dir,
     output_root,
+    dataset_class=None,
+    dataset_name: str = "mip360",
     factor: int = 1,
+    llffhold: int = 8,
+    split_mode: str = "llff",
+    split_test_offset: int | None = None,
+    expected_views: int = 0,
+    expected_primitives: int = 0,
     num_epochs=60000,
     batch_size=4096,
     lr=1e-3,
@@ -914,18 +919,11 @@ def train_scene_llff(
             print(f"[Resume] Override num_primitives from {initial_num_primitives} -> {inferred_n}")
             initial_num_primitives = int(inferred_n)
 
-    # Set saving directory
+    # ``output_root`` is the exact run directory unless an explicit tag asks
+    # for one named child.  This mirrors common 3DGS/NeRF command-line usage.
     os.makedirs(output_root, exist_ok=True)
-    if resume_ckpt:
-        # Never trust a machine-specific output_dir stored inside a checkpoint.
-        # The caller's explicit output_root controls every write on resume.
-        random_tag = str(run_tag).strip() if run_tag and str(run_tag).strip() else "resumed"
-        output_dir = os.path.join(output_root, random_tag) if random_tag != "resumed" else output_root
-    else:
-        random_tag = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
-        if run_tag is not None and str(run_tag).strip():
-            random_tag = str(run_tag).strip()
-        output_dir = os.path.join(output_root, random_tag)
+    random_tag = str(run_tag).strip() if run_tag and str(run_tag).strip() else os.path.basename(os.path.abspath(output_root))
+    output_dir = os.path.join(output_root, random_tag) if run_tag and str(run_tag).strip() else output_root
     os.makedirs(output_dir, exist_ok=True)
 
     feature_type = str(feature_type).lower()
@@ -994,34 +992,47 @@ def train_scene_llff(
             print(f"[Feature] Decoder disabled (low_dim == gt_dim == {feature_dim_gt})")
 
     use_mock_feature = False
+    resolved_dataset_class = mip360Dataset if dataset_class is None else dataset_class
+    dataset_kwargs = {
+        "basedir": data_dir,
+        "factor": factor,
+        "llffhold": int(llffhold),
+        "split": "train",
+        "split_mode": split_mode,
+        "split_test_offset": split_test_offset,
+        "feature_type": feature_type,
+        "feature_dir": feature_dir,
+        "preload_features": bool(preload_features),
+        "feature_cache_size": int(feature_cache_size),
+        "feature_resize_to_image": False,
+        "ray_cache_size": int(ray_cache_size),
+    }
     try:
-        dataset = mip360Dataset(
-            data_dir,
-            factor=factor,
-            feature_type=feature_type,
-            feature_dir=feature_dir,
-            preload_features=bool(preload_features),
-            feature_cache_size=int(feature_cache_size),
-            feature_resize_to_image=False,
-            ray_cache_size=int(ray_cache_size),
+        dataset = resolved_dataset_class(
+            **_filter_kwargs_for_callable(resolved_dataset_class.__init__, dataset_kwargs)
         )
     except (FileNotFoundError, KeyError, ValueError) as exc:
         if use_feature_metric and feature_mock_from_rgb:
             print(f"[Feature] {exc}")
             print("[Feature] Falling back to RGB-projected mock features for pipeline verification.")
-            dataset = mip360Dataset(
-                data_dir,
-                factor=factor,
+            fallback_kwargs = dict(dataset_kwargs)
+            fallback_kwargs.update(
                 feature_type="none",
                 feature_dir=None,
                 preload_features=False,
                 feature_cache_size=0,
-                feature_resize_to_image=False,
-                ray_cache_size=int(ray_cache_size),
+            )
+            dataset = resolved_dataset_class(
+                **_filter_kwargs_for_callable(resolved_dataset_class.__init__, fallback_kwargs)
             )
             use_mock_feature = True
         else:
             raise
+    if int(expected_views) > 0 and len(dataset) != int(expected_views):
+        raise RuntimeError(
+            f"Training split has {len(dataset)} views; expected {int(expected_views)}. "
+            "Check the dataset archive and split settings."
+        )
     tile_size = int(tile_size)
     if tile_size <= 0:
         raise ValueError("tile_size must be a positive integer.")
@@ -1069,6 +1080,15 @@ def train_scene_llff(
     scene = NeuralPrimitiveSceneTileCUDA(
         **_filter_kwargs_for_callable(NeuralPrimitiveSceneTileCUDA.__init__, scene_kwargs)
     ).to(device)
+    if (
+        not resume_ckpt
+        and int(expected_primitives) > 0
+        and int(scene.num_primitives) != int(expected_primitives)
+    ):
+        raise RuntimeError(
+            f"Octree initialized {int(scene.num_primitives)} primitives; expected "
+            f"{int(expected_primitives)}. Check the point cloud and octree threshold."
+        )
     os.environ["MLPSP_TILE_ORDER"] = str(tile_order)
     slot_layout = (
         "direct_tetrahedral"
@@ -1076,6 +1096,17 @@ def train_scene_llff(
         else "legacy_base_plus_four_deltas"
     ) if use_feature_metric else "none"
     scene.checkpoint_metadata = {
+        "dataset": str(dataset_name),
+        "dataset_split": "train",
+        "factor": int(factor),
+        "llffhold": int(llffhold),
+        "split_mode": str(split_mode),
+        "split_test_offset": (
+            None if split_test_offset is None else int(split_test_offset)
+        ),
+        "training_views": int(len(dataset)),
+        "iterations": int(num_epochs),
+        "seed": int(torch.initial_seed()),
         "renderer": "tile_cuda",
         "tile_order": str(tile_order),
         "tile_size": int(tile_size),
@@ -1094,6 +1125,12 @@ def train_scene_llff(
         "feature_decoder_enabled": bool(use_feature_decoder),
         "tile_mosaic": bool(use_tile_mosaic),
         "tile_mosaic_views": int(tile_mosaic_k_views),
+        "max_points_per_leaf": int(min_points),
+        "learning_rate": float(lr),
+        "position_learning_rate": 1e-4,
+        "log_scale_learning_rate": float(log_scale_lr),
+        "lambda_dssim": float(lambda_dssim),
+        "feature_loss_weight": float(feature_loss_weight),
     }
 
     feature_decoder = None
