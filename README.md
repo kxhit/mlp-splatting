@@ -143,8 +143,9 @@ python train.py \
 ```
 
 Both configs freeze 60,000 iterations, 8×8 tile-center traversal, four-view
-tile mosaics, four direct 512D feature slots, the data split, optimizer values,
-and evaluation settings. Command-line options override config values. Run
+tile mosaics, four effective 512D feature slots (trained as a shared base plus
+four residual tensors), the data split, optimizer values, and evaluation
+settings. Command-line options override config values. Run
 `python train.py --help` for the full interface. Use `--feature-type none` for
 an RGB-only experiment.
 

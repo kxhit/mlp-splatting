@@ -24,7 +24,7 @@ def test_fast_config_drives_train_and_eval_defaults():
     assert train_args.tile_size == 8
     assert train_args.tile_mosaic_k_views == 4
     assert train_args.feature_type == "lseg"
-    assert train_args.feature_slots == 4
+    assert train_args.feature_slots == 5
     assert train_args.expected_views == 70
     assert train_args.expected_primitives == 1344
 

@@ -130,7 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     feature.add_argument(
         "--feature-slots", "--feature_slots", dest="feature_slots", type=int,
         choices=(4, 5), default=4,
-        help="Four direct tetrahedral slots are canonical; five is accepted only for legacy resumes.",
+        help=(
+            "Storage layout: four direct slots, or the paper-run-compatible "
+            "shared base plus four residuals (5 tensors)."
+        ),
     )
     feature.add_argument(
         "--gating-beta", "--feature_gating_beta", dest="feature_gating_beta",
@@ -214,8 +217,6 @@ def main(argv: list[str] | None = None) -> None:
         parser.error("--expected-primitives cannot be negative")
     if args.feature_lowdim_divisor <= 0:
         parser.error("--feature-lowdim-divisor must be positive")
-    if args.feature_slots == 5 and args.resume_ckpt is None:
-        parser.error("--feature-slots 5 is reserved for resuming legacy checkpoints")
     set_seed(args.seed)
 
     output_dir = Path(args.output_dir).expanduser()

@@ -35,7 +35,7 @@
     "feature_type": "lseg",
     "feature_loss_weight": 1.0,
     "feature_lowdim_divisor": 1,
-    "feature_slots": 4,
+    "feature_slots": 5,
     "feature_gating_beta": 1.5,
     "feature_gating_temp": 2.0,
     "feature_decoder_hidden_dim": 128,

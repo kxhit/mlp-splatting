@@ -219,10 +219,10 @@ def test_warp_aggregated_atomic_handles_sparse_peer_masks(tile_ext):
         ("render_tiles_backward_count_per_pixel", 256, "per-pixel intersection capacity 256 exceeded"),
         ("render_tiles_backward_emit_per_pixel", 256, "per-pixel intersection capacity 256 exceeded"),
         ("render_tiles_backward_featattr_per_pixel", 256, "per-pixel intersection capacity 256 exceeded"),
-        ("render_tiles_forward_tilecenter", 512, "tile candidate capacity 512 exceeded"),
-        ("render_tiles_forward_tilecenter_with_feat", 512, "tile candidate capacity 512 exceeded"),
-        ("render_tiles_backward_tilecenter_full", 512, "tile candidate capacity 512 exceeded"),
-        ("render_tiles_backward_featattr_tilecenter", 512, "tile candidate capacity 512 exceeded"),
+        ("render_tiles_forward_tilecenter", 768, "tile candidate capacity 768 exceeded"),
+        ("render_tiles_forward_tilecenter_with_feat", 768, "tile candidate capacity 768 exceeded"),
+        ("render_tiles_backward_tilecenter_full", 768, "tile candidate capacity 768 exceeded"),
+        ("render_tiles_backward_featattr_tilecenter", 768, "tile candidate capacity 768 exceeded"),
     ],
 )
 def test_rgb_and_feature_entry_points_fail_explicitly_on_capacity_overflow(
