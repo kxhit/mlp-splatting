@@ -4,9 +4,14 @@
 
 ### Object-Centric Neural Fields
 
-Compact neural primitives for photorealistic rendering, scene decomposition, and feature-aware interaction.
+Compact neural primitives for photorealistic rendering, scene decomposition,
+and feature-aware interaction.
 
-[**Paper**](https://arxiv.org/abs/2606.03877) · [**Project page**](https://www.shinjeongkim.com/mlp-splatting/) · [**Benchmarks**](benchmarks/bigboy_room0/README.md)
+[**Paper**](https://arxiv.org/abs/2606.03877) ·
+[**Project page**](https://www.shinjeongkim.com/mlp-splatting/) ·
+[**Teaser video**](https://www.shinjeongkim.com/mlp-splatting/static/videos/teaser.mp4) ·
+[**Interactive demo**](https://www.shinjeongkim.com/mlp-splatting/#visualization) ·
+[**Models & logs**](https://github.com/kxhit/mlp-splatting/releases/tag/v0.2.0)
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.03877-b31b1b.svg)](https://arxiv.org/abs/2606.03877)
 [![ECCV](https://img.shields.io/badge/ECCV-2026-6f42c1.svg)](https://www.shinjeongkim.com/mlp-splatting/)
@@ -17,25 +22,33 @@ Compact neural primitives for photorealistic rendering, scene decomposition, and
 
 </div>
 
-MLP Splatting represents a scene with a small set of spatially localized neural primitives. Each primitive is a compact MLP mapping viewing direction and the soft-contact residual to color and density; four locally gated feature slots extend the same representation to dense semantic features.
+MLP Splatting represents a scene with a small set of spatially localized
+light-field MLPs. Each primitive predicts radiance and opacity within an
+anisotropic Gaussian support, combining the compactness of a neural field with
+independent, object-level control. Optional semantic feature distillation adds
+open-vocabulary selection, segmentation, and editing to the same representation.
 
-This repository exposes one canonical implementation: the feature-capable tile CUDA renderer. Historical experimental renderers, duplicated scene folders, notebooks, generated binaries, and machine-specific launch code have been removed from the public path.
+This release distills the development code into one canonical feature-aware,
+tile-based CUDA path. Its primary Replica `room0` recipe uses the paper's
+`m=10` setting: **2,398 primitives and 36.2243 dB**, within **0.006 dB** of the
+paper's 36.23 dB result.
 
-## Method
+## Reproduce room0
 
-- **Object-centric primitives.** Local support makes every neural field spatially interpretable while retaining more capacity than an atomic point primitive.
-- **Compact radiance MLPs.** A 6D position-direction input is encoded to 72 dimensions and evaluated by a `72 → 32 → 32 → 4` network.
-- **Sparse tile rendering.** Conservative projected-support bounds build each tile's candidate list; shared tile-center ordering, block radix sorting, and early termination keep inference efficient.
-- **Feature-aware compositing.** Four tetrahedrally gated feature slots per primitive are blended by the same visibility weights as RGB.
-- **Simple training.** An octree initializes primitives from the COLMAP point cloud; the paper configuration uses no densification or pruning.
+The released checkpoint and recipe evaluate ten fixed held-out views from the
+Feature-3DGS Replica split. The default is the fastest tested fused RGB+feature
+configuration inside a 0.10 dB quality budget.
 
-<p align="center">
-  <img src="assets/lseg_semantics.jpg" alt="Rendered LSeg features and open-vocabulary semantic segmentation" width="92%">
-</p>
+| | Primitives | PSNR ↑ | Δ vs. paper |
+|---|---:|---:|---:|
+| Paper, `m=10` | 2,398 | 36.23 dB | — |
+| **This release** | **2,398** | **36.2243 dB** | **−0.0057 dB** |
 
-## Installation
+### Installation
 
-The custom renderer requires Linux, an NVIDIA GPU, a CUDA toolkit with `nvcc`, and a compiler compatible with the selected PyTorch build.
+You need Linux, Python 3.10+, an NVIDIA GPU, and a CUDA toolkit containing
+`nvcc`. The verified benchmark environment used Python 3.11.14, PyTorch
+2.9.0+cu128, torchvision 0.24.0+cu128, and CUDA toolkit 12.1.
 
 ```bash
 git clone https://github.com/kxhit/mlp-splatting.git
@@ -45,199 +58,214 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 
-# Install the appropriate PyTorch CUDA wheel first:
-# https://pytorch.org/get-started/locally/
-python -m pip install -e .
+# Install a PyTorch wheel compatible with your driver first.
+# See https://pytorch.org/get-started/locally/
+python -m pip install torch torchvision
+python -m pip install -r requirements.txt
+python -m pip install -e . --no-deps
+
+python scripts/check_install.py
 ```
 
-The extension in `mip360/cuda/np_tile_kernels.cu` is compiled lazily on first render and cached by PyTorch. Set `TORCH_EXTENSIONS_DIR` when an explicit cache location is useful.
+The extension in `mip360/cuda/np_tile_kernels.cu` compiles lazily on the first
+render. Set `TORCH_EXTENSIONS_DIR` to choose its build cache. Perceptual and
+semantic evaluation have a separate dependency set:
 
-The editable install also provides `mlpsp-train`, `mlpsp-train-replica`, `mlpsp-eval-rgb`, `mlpsp-eval-lseg`, `mlpsp-benchmark`, and `mlpsp-convert-checkpoint`. The source-tree commands below remain explicit so their implementation is easy to locate.
+```bash
+python -m pip install -r requirements-optional.txt
+```
 
-## Data
+### Data
 
-Scenes use COLMAP metadata and Mip-NeRF 360-style image folders. Optional feature tensors are matched to images by filename stem and can be stored as `.npy`, `.npz`, or `.pt`.
+Download the
+[Feature-3DGS processed Replica archive](https://drive.google.com/file/d/1sC2ZJUBRHKeWXXVUj7rIBEM-xaibvGw7/view?usp=sharing).
+The `room0` directory should have this layout:
 
 ```text
-<scene>/
-├── images/                       # full resolution
-├── images_{2,4,8}/               # optional downsampled images
+room0/
+├── images/
 ├── sparse/0/
 │   ├── cameras.bin
 │   ├── images.bin
 │   └── points3D.bin
-├── rgb_feature_langseg/          # optional 512D LSeg features
-└── sam_embeddings/               # optional 256D SAM features
+└── rgb_feature_langseg/         # 512D LSeg features
 ```
 
-Use `--factor 1`, `2`, `4`, or `8` to select the corresponding image folder. Evaluation JSON records the exact ordered view manifest so that split mismatches are visible. LSeg tensors must expose a 512-channel axis and SAM tensors a 256-channel axis; ambiguous feature layouts and duplicate normalized stems fail explicitly. The current camera path accepts shared, centered, distortion-free `SIMPLE_PINHOLE` intrinsics or near-square-pixel `PINHOLE` intrinsics; unsupported or inconsistent COLMAP cameras likewise fail instead of producing incorrect rays.
+The recipe requires 80 ordered images and applies the Feature-3DGS split
+(`llffhold=8`, offset 2): 70 training views and 10 test views. A mismatch fails
+before training or evaluation instead of silently changing the protocol.
+Please retain the terms and citation of the
+[Replica dataset](https://github.com/facebookresearch/Replica-Dataset).
 
-For the `room0` numbers below, use the [Feature-3DGS processed Replica archive](https://drive.google.com/file/d/1sC2ZJUBRHKeWXXVUj7rIBEM-xaibvGw7/view?usp=sharing), whose scene folders already follow this COLMAP layout. The source dataset and download instructions live in the [official Replica repository](https://github.com/facebookresearch/Replica-Dataset); retain its license and citation when redistributing data. The benchmark fixes `replica_feature3dgs`, `test_offset=2`, factor 1, and checks that exactly ten held-out views are present.
-
-## Training
-
-The paper reports a `72 → 32 → 32 → 4` MLP, 512D features, 8×8 tiles, the learning rates below, and 60,000 iterations. The public recipe additionally selects tile-center traversal, four-view tile mosaics, `--min-points 10`, and direct four-slot feature storage.
+### Checkpoint evaluation
 
 ```bash
-python mip360/run.py \
-  --data <scene> \
-  --output outputs/<scene>-lseg \
-  --feature-type lseg \
-  --feature-dir <scene>/rgb_feature_langseg
+mkdir -p checkpoints
+curl -L \
+  https://github.com/kxhit/mlp-splatting/releases/download/v0.2.0/room0_lseg512_tile8_60000_m10_slots4.pt \
+  -o checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt
+
+echo "dc49ba8de3eec72e6f8b5205501817b2a654c20fc5fd3dc8860167eb0aeb9f89  checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt" \
+  | sha256sum --check
+
+bash scripts/reproduce_room0.sh \
+  /path/to/room0 \
+  checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt
 ```
 
-For Replica, use the dataset-specific entrypoint with the same arguments:
+The checkpoint is 53,605,040 bytes. The script uses the public root entrypoint,
+checks the exact ten-view manifest, and requires PSNR in `[36.18, 36.27]` dB.
+The equivalent direct command is:
 
 ```bash
-python replica/run.py \
-  --data <replica-scene> \
-  --output outputs/<scene>-lseg \
-  --feature-type lseg
+python evaluate.py \
+  --config configs/replica/room0_lseg.json \
+  --data /path/to/room0 \
+  --checkpoint checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt \
+  --disable-lpips \
+  --output results/room0_lseg.json
 ```
 
-Useful explicit defaults are:
+## Train
 
-```text
---iterations 60000       --min-points 10
---tile-order tilecenter  --tile-size 8
---tile-mosaic            --mosaic-views 4
---feature-slots 4        --feature-lowdim-divisor 1
---learning-rate 1e-3     --log-scale-lr 1e-2
-```
-
-Use `--feature-type none` for RGB-only training. Position parameters use a learning rate of `1e-4`, matching the paper. Run `python mip360/run.py --help` for the complete interface.
-
-## Evaluation
-
-RGB metrics:
+The two public experiment entrypoints live at the repository root. Dataset
+recipes live under `configs/`; models, loaders, and CUDA implementation details
+remain inside their packages. `--output` is the exact run directory and stores
+the resolved configuration alongside every checkpoint.
 
 ```bash
-python mip360/eval_rgb_psnr.py \
-  --data_dir <scene> \
-  --scene_ckpt <checkpoint.pt> \
-  --dataset_loader replica \
-  --split_mode replica_feature3dgs \
-  --split_test_offset 2 \
-  --tile_order tilecenter \
-  --tile_size 8 \
-  --score_threshold 3e-3 \
-  --disable_lpips \
-  --save_json metrics.json
+python train.py \
+  --config configs/replica/room0_lseg.json \
+  --data /path/to/room0 \
+  --output outputs/room0_lseg
 ```
 
-`mip360/eval_lseg_table2.py` provides the semantic evaluation path used for paper-style LSeg metrics. Semantic labels and text embeddings are dataset-specific and are not bundled. Install the optional dependencies, then provide either precomputed text features or label names for CLIP encoding:
+This recipe freezes the `m=10` / 2,398-primitive setup, 60,000 iterations, 8×8
+tile-center traversal, four-view tile mosaics, the Feature-3DGS split, optimizer
+values, and feature settings. Historical training runs store five feature
+tensors per primitive: one shared base plus four residuals, yielding four
+effective directional 512D slots. The deployment checkpoint above folds these
+losslessly into four direct slots.
+
+Evaluate a newly trained checkpoint with the same recipe:
 
 ```bash
-python -m pip install -e ".[evaluation]"
+python evaluate.py \
+  --config configs/replica/room0_lseg.json \
+  --data /path/to/room0 \
+  --checkpoint outputs/room0_lseg/scene_epoch_60000.pt \
+  --output results/room0_lseg_trained.json
+```
 
+Evaluation reports image-wise PSNR, SSIM, LPIPS, and synchronized render FPS.
+Use `--disable-lpips` when only PSNR/SSIM and renderer timing are required.
+Command-line arguments override config values; run `python train.py --help` or
+`python evaluate.py --help` for the complete interfaces.
+
+The smaller `configs/replica/room0_lseg_fast.json` recipe is retained only to
+reproduce the paper's `m=20` compact ablation (1,344 primitives / 35.88 dB). It
+is not the main `m=10` reproduction.
+
+## Semantic evaluation
+
+`mip360/eval_lseg_table2.py` evaluates rendered LSeg features against semantic
+labels. Labels and matching LSeg text embeddings are dataset-specific and are
+not redistributed here.
+
+```bash
 python mip360/eval_lseg_table2.py \
-  --data_dir <scene> \
-  --scene_ckpt <checkpoint.pt> \
+  --data_dir /path/to/room0 \
+  --scene_ckpt outputs/room0_lseg/scene_epoch_60000.pt \
+  --factor 1 \
   --gt_mode semantic_png \
-  --gt_semantic_dir <semantic-label-pngs> \
-  --labels_file <one-label-per-line.txt> \
-  --text_feature_pt <matching-lseg-text-features.pt> \
+  --gt_semantic_dir /path/to/labels \
+  --labels_file /path/to/labels.txt \
+  --text_feature_pt /path/to/lseg_text_features.pt \
   --tile_order tilecenter \
   --tile_size 8 \
-  --score_threshold 3e-3 \
-  --save_json semantic-metrics.json
+  --score_threshold 5e-3 \
+  --save_json results/room0_semantics.json
 ```
 
-Omit `--text_feature_pt` to encode `--labels_file` with the pinned OpenAI CLIP dependency.
+Omit `--text_feature_pt` to encode the label list with the pinned official
+OpenAI CLIP dependency.
 
-## Inference benchmark harness
+## Renderer selection
 
-The benchmark renders both RGB-only and fused RGB+feature outputs, measures synchronized wall and CUDA-event latency after full-view warm-up cycles, computes PSNR, verifies RGB parity between both kernels, and saves hardware, view, command, Git, source-hash, and checkpoint-hash provenance.
+We benchmarked the 2,398-primitive checkpoint independently on physical GPU 0
+and GPU 1 of `bigboy`, both NVIDIA RTX 6000 Ada cards. Each result covers the
+same ten 638×478 held-out views, with three complete warm-up cycles followed by
+three timed cycles per GPU and output mode. The table reports the two-GPU mean.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python tools/benchmark_inference.py \
-  --data <scene> \
-  --checkpoint <feature-checkpoint.pt> \
-  --dataset-loader replica \
-  --split-mode replica_feature3dgs \
-  --split-test-offset 2 \
-  --expected-views 10 \
-  --tile-order tilecenter \
-  --tile-size 8 \
-  --score-threshold 3e-3 \
-  --warmup-cycles 3 \
-  --timed-cycles 3 \
-  --output benchmark-gpu0.json
-```
-
-Run the same command with `CUDA_VISIBLE_DEVICES=1` in a second shell for the other card.
-
-### Bigboy release selection
-
-We screened the recovered feature renderer and cross-ran the finalists on physical GPU 0 and 1, both **NVIDIA RTX 6000 Ada Generation** cards. The test scene is Replica `room0` at 638×478: ten fixed held-out views, a 60k-step checkpoint with 1,344 primitives and 512D features, three full warm-up cycles, then three timed cycles per GPU and mode. Values below are means across both cards.
-
-| Ordering | Tile | Threshold | PSNR ↑ | RGB-only FPS ↑ | Fused RGB+feature FPS ↑ |
+| Traversal | Tile | Threshold | PSNR ↑ | RGB FPS ↑ | RGB + feature FPS ↑ |
 |---|---:|---:|---:|---:|---:|
-| per-pixel | 16×16 | `3e-3` | **35.9023** | **61.26** | 11.83 |
-| **tile-center** | **8×8** | **`3e-3`** | **35.8490** | 28.28 | **12.53** |
-| tile-center, aggressive | 8×8 | `1e-2` | 35.6924 | 32.42 | 14.47 |
+| per-pixel reference | 16×16 | `1e-3` | **36.3095** | **32.7092** | 7.6796 |
+| **tile-center release** | **8×8** | **`5e-3`** | **36.2243** | 22.4812 | **10.2083** |
 
-The released default is **tile-center / 8×8 / `3e-3`**. On the frozen clean release, fused feature inference is 5.9% faster than the cross-GPU per-pixel quality reference while losing only 0.053 dB PSNR. The `1e-2` preset is another 15.5% faster but gives up a further 0.157 dB. Fused and RGB-only kernels produced bit-exact RGB in every run.
+Tile-center / 8×8 / `5e-3` is the released feature-aware default: it improves
+fused RGB+feature throughput by **32.9% on average per GPU** while changing
+PSNR by **−0.0852 dB** relative to the per-pixel quality reference. Fused and
+RGB-only paths produced bit-exact RGB in every timed run. For RGB-only
+throughput, the per-pixel path is faster and remains available through the CLI.
 
-All values in the table are frozen-commit reruns: 30 measured frames per GPU and output mode after complete warm-up. The [GPU 0](benchmarks/bigboy_room0/release_gpu0_tilecenter_t8_s3e-3.json) and [GPU 1](benchmarks/bigboy_room0/release_gpu1_tilecenter_t8_s3e-3.json) reports contain raw timings and provenance; reference and aggressive reports sit beside them.
+These measurements characterize RTX 6000 Ada execution and are not a direct
+replacement for the paper's RTX 4090 timing table. Raw per-frame timings,
+commands, source and checkpoint hashes, and hardware metadata are preserved in
+the
+[v0.2.0 benchmark archive](https://github.com/kxhit/mlp-splatting/releases/download/v0.2.0/room0_m10_rtx6000ada_benchmarks.zip),
+not in the source tree.
 
-These are engineering measurements for code selection, not replacements for the paper tables. Raw per-frame results and the complete protocol are committed under [`benchmarks/bigboy_room0`](benchmarks/bigboy_room0/README.md).
-
-The exact converted four-slot checkpoint used above is attached to [release `v0.1.0`](https://github.com/kxhit/mlp-splatting/releases/download/v0.1.0/room0_lseg512_tile8_60000_slots4.pt) (30,046,256 bytes; SHA-256 `9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29`).
-
-## Legacy feature checkpoints
-
-Four direct tetrahedral slots are the release storage corresponding to the paper's four-expert formulation. Some development checkpoints store one base plus four residual slots:
-
-```text
-legacy:   f(x) = base + Σₖ gₖ(x) · deltaₖ
-release:  f(x) = Σₖ gₖ(x) · slotₖ,   slotₖ = base + deltaₖ
-```
-
-Because the four gating weights sum to one, conversion is algebraically equivalent:
-
-```bash
-python tools/convert_legacy_checkpoint.py \
-  --input <five-slot-checkpoint.pt> \
-  --output <four-slot-checkpoint.pt>
-```
-
-The converter preserves bare or wrapped checkpoint structure, synchronizes shape metadata, normalizes historical key names, refuses in-place writes, and never overwrites an existing output. If the slot shape changes, incompatible optimizer moments are deliberately removed; resume with a fresh optimizer. On the real `room0` checkpoint, RGB stayed bit-exact and feature RMSE was `1.38e-8`; the four-slot feature-attribute tensor has 20% fewer elements. Keep the original checkpoint until the converted file has been verified on its scene.
-
-### Checkpoint-compatible defaults
-
-The recovered 60k feature checkpoint is a bare state dictionary and does not record every runtime hyperparameter. Its training code uses six frequency bands and the attenuated-phase encoding
-`[sin(xωa), cos(xωa)]`, where `a = exp(-½ω²σ²)` and `σ=0.01`. Feature gates use
-`u = clip(Rᵀδ / (βs), -1, 1)`, `β=1.5`, and logits `τ(±uₓ ±uᵧ ±u_z)` with `τ=2.0`. These are the recovered implementation semantics needed by historical checkpoints; they are not literal implementations of paper Equations (5) and (7). New checkpoints record the encoding version, `σ`, gate values, and slot layout in metadata. Override them only when the originating run is known to differ.
-
-## Repository map
+## Repository layout
 
 ```text
-mip360/                         canonical model, training, evaluation
-└── cuda/np_tile_kernels.cu     feature-capable tile renderer
-replica/                        Replica loader and training entrypoint
-tools/                          benchmark and checkpoint migration tools
-tests/                          CPU compatibility and optional CUDA tests
-benchmarks/bigboy_room0/        two-GPU selection evidence
+train.py                         public training entrypoint
+evaluate.py                      public RGB evaluation entrypoint
+configs/replica/                 main and ablation room0 recipes
+mip360/                          model, trainer, evaluation, COLMAP loader
+└── cuda/np_tile_kernels.cu      feature-aware tile renderer
+replica/                         Replica-specific dataset loader
+scripts/                         install check and one-command reproduction
+tools/                           benchmark and checkpoint migration utilities
+tests/                           CPU tests plus optional CUDA regressions
 ```
 
-## Limitations
+## Reproduction scope
 
-- Rendering is CUDA-only; no CPU renderer is provided.
-- Tile-center ordering is approximate. Validate against `per_pixel` when moving to a new dataset or resolution.
-- CUDA kernels have explicit checked capacities: tile-center order accepts up to 512 candidates per tile, while per-pixel order accepts up to 256 actual ray–primitive intersections. Conservative per-pixel tile lists may be larger. The renderer raises instead of silently truncating. Smaller tiles reduce tile-center candidate spans; a higher score threshold can reduce both candidates and actual hits.
-- In the current CUDA autograd path, feature loss updates `feat_attr` only; RGB supervision remains responsible for primitive geometry and appearance.
-- Feature extraction is outside this repository. Precomputed features must align with RGB filename stems; their spatial grid may differ and is matched during training.
-- No open-source license has been declared yet. Until the authors add one, the repository remains source-available without an implied reuse license. Third-party attribution is recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+The numbers above are checkpoint-reproduction results from a clean checkout on
+both `bigboy` GPUs: 10/10 expected views, 36.2243 dB tile-center PSNR, and
+bit-exact fused/RGB color. A full quality pass measured 0.9606 SSIM and 0.09334
+LPIPS-VGG. A real one-iteration `m=10` training smoke test also
+loaded all 80 images and features, constructed the expected 70/10 split,
+initialized exactly 2,398 primitives, wrote a reloadable checkpoint, and
+evaluated a held-out view. A fresh 60k training run has not yet been
+independently repeated in this curated repository; do not present the released
+checkpoint evaluation as a newly trained result.
+
+Some historical implementation values are absent from the paper and are
+therefore frozen and labeled in
+[`configs/replica/README.md`](configs/replica/README.md). In particular, the
+released checkpoint uses attenuated-phase encoding (`sigma=0.01`) and recovered
+feature-gate constants (`beta=1.5`, temperature `2.0`). Feature loss updates
+feature attributes and the decoder; primitive geometry, opacity, and appearance
+remain RGB-supervised.
+
+Rendering is CUDA-only. Tile candidate capacities are checked explicitly and
+raise on overflow rather than truncating silently. Tile-center ordering is an
+approximation, so validate against `per_pixel` when moving to a new dataset or
+resolution.
+
+No open-source license has been declared yet. Until the authors add one, this
+repository is source-available without an implied reuse license. Third-party
+attribution is recorded in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## Citation
 
 ```bibtex
 @inproceedings{kim2026mlpsplatting,
-  title   = {MLP Splatting: Object-Centric Neural Fields},
-  author  = {Kim, Shinjeong and Cheng, Yuzhou and Kong, Xin and Kelly, Paul H. J. and Davison, Andrew J.},
+  title     = {MLP Splatting: Object-Centric Neural Fields},
+  author    = {Kim, Shinjeong and Cheng, Yuzhou and Kong, Xin and Kelly, Paul H. J. and Davison, Andrew J.},
   booktitle = {The European Conference on Computer Vision (ECCV)},
-  year    = {2026}
+  year      = {2026}
 }
 ```
 

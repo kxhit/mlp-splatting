@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "name": "replica-room0-lseg-fast",
+  "description": "Released room0 checkpoint recipe using the faster m=20 octree ablation.",
+  "provenance": {
+    "paper": "https://arxiv.org/abs/2606.03877",
+    "paper_room0_target": {
+      "max_points_per_leaf": 20,
+      "primitives": 1344,
+      "memory_mb": 31,
+      "fps": 11.2,
+      "psnr_db": 35.88
+    },
+    "verified_release": {
+      "primitives": 1344,
+      "mean_psnr_db": 35.848999,
+      "checkpoint_sha256": "9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29"
+    }
+  },
+  "training": {
+    "dataset": "replica",
+    "factor": 1,
+    "llffhold": 8,
+    "split_mode": "replica_feature3dgs",
+    "split_test_offset": 2,
+    "expected_views": 70,
+    "expected_primitives": 1344,
+    "num_epochs": 60000,
+    "seed": 2025,
+    "max_points_per_leaf": 20,
+    "tile_order": "tilecenter",
+    "tile_size": 8,
+    "tile_mosaic": true,
+    "tile_mosaic_k_views": 4,
+    "feature_type": "lseg",
+    "feature_loss_weight": 1.0,
+    "feature_lowdim_divisor": 1,
+    "feature_slots": 5,
+    "feature_gating_beta": 1.5,
+    "feature_gating_temp": 2.0,
+    "feature_decoder_hidden_dim": 128,
+    "lr": 0.001,
+    "log_scale_lr": 0.01,
+    "lambda_dssim": 0.1,
+    "log_scale_min": -12.0,
+    "log_scale_max": 4.0,
+    "log_scale_grad_clip": 0.0,
+    "black_border_mask": "off",
+    "black_border_threshold": 0.001
+  },
+  "evaluation": {
+    "dataset_loader": "replica",
+    "split": "test",
+    "factor": 1,
+    "llffhold": 8,
+    "split_mode": "replica_feature3dgs",
+    "split_test_offset": 2,
+    "expected_views": 10,
+    "tile_order": "tilecenter",
+    "tile_size": 8,
+    "score_threshold": 0.003,
+    "max_points_per_leaf": 20,
+    "limit_frames": 0,
+    "warmup_frames": 1,
+    "lpips_net": "vgg"
+  }
+}

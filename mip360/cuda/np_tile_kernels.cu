@@ -30,7 +30,7 @@ __device__ __forceinline__ void atomicMaxFloatPos(float* addr, float val) {
 }
 
 #ifndef MLPSP_MAX_TILE_PRIMS
-#define MLPSP_MAX_TILE_PRIMS 512
+#define MLPSP_MAX_TILE_PRIMS 768
 #endif
 
 #ifndef MLPSP_MAX_H
@@ -1868,7 +1868,7 @@ __global__ void render_tiles_kernel_tilecenter_order(
   // while the remaining threads participate in sort/staging work.
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
-  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 3
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
 
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -2175,9 +2175,9 @@ __global__ void render_tiles_kernel_tilecenter_order_stats(
     return;
   }
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
-  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 3
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
 
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -3382,7 +3382,7 @@ __global__ void render_tiles_backward_featattr_tilecenter(
   const float crdy = rays_d[pix_c*3+1];
   const float crdz = rays_d[pix_c*3+2];
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -3592,7 +3592,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_backp
   const int tile_len = (int)(prim_end - prim_start);
   if (tile_len <= 0) return;
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -5266,9 +5266,9 @@ __global__ void render_tiles_kernel_tilecenter_order_with_t(
 
   // Block-level radix sort uses a fixed 256-thread block; only the first TW*TH threads map to pixels
   // while the remaining threads participate in sort/staging work.
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
-  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 2
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 3
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
 
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -5622,7 +5622,7 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
     return;
   }
 
-  constexpr int MAX_TILE_PRIMS = 512;
+  constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
   constexpr int BLOCK_THREADS = 256;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");

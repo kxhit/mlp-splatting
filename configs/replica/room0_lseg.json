@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "replica-room0-lseg-paper",
+  "description": "Paper-quality room0 recipe using the paper's octree threshold m=10.",
+  "provenance": {
+    "paper": "https://arxiv.org/abs/2606.03877",
+    "paper_room0_target": {
+      "max_points_per_leaf": 10,
+      "primitives": 2398,
+      "memory_mb": 56,
+      "fps": 8.0,
+      "psnr_db": 36.23
+    },
+    "verified_release": {
+      "primitives": 2398,
+      "mean_psnr_db": 36.224297,
+      "checkpoint_file": "room0_lseg512_tile8_60000_m10_slots4.pt",
+      "checkpoint_bytes": 53605040,
+      "checkpoint_sha256": "dc49ba8de3eec72e6f8b5205501817b2a654c20fc5fd3dc8860167eb0aeb9f89"
+    },
+    "note": "This is the primary room0 reproduction. Split and unspecified implementation defaults are frozen by this repository; see configs/replica/README.md."
+  },
+  "training": {
+    "dataset": "replica",
+    "factor": 1,
+    "llffhold": 8,
+    "split_mode": "replica_feature3dgs",
+    "split_test_offset": 2,
+    "expected_views": 70,
+    "expected_primitives": 2398,
+    "num_epochs": 60000,
+    "seed": 2025,
+    "max_points_per_leaf": 10,
+    "tile_order": "tilecenter",
+    "tile_size": 8,
+    "tile_mosaic": true,
+    "tile_mosaic_k_views": 4,
+    "feature_type": "lseg",
+    "feature_loss_weight": 1.0,
+    "feature_lowdim_divisor": 1,
+    "feature_slots": 5,
+    "feature_gating_beta": 1.5,
+    "feature_gating_temp": 2.0,
+    "feature_decoder_hidden_dim": 128,
+    "lr": 0.001,
+    "log_scale_lr": 0.01,
+    "lambda_dssim": 0.1,
+    "log_scale_min": -12.0,
+    "log_scale_max": 4.0,
+    "log_scale_grad_clip": 0.0,
+    "black_border_mask": "off",
+    "black_border_threshold": 0.001
+  },
+  "evaluation": {
+    "dataset_loader": "replica",
+    "split": "test",
+    "factor": 1,
+    "llffhold": 8,
+    "split_mode": "replica_feature3dgs",
+    "split_test_offset": 2,
+    "expected_views": 10,
+    "tile_order": "tilecenter",
+    "tile_size": 8,
+    "score_threshold": 0.005,
+    "max_points_per_leaf": 10,
+    "limit_frames": 0,
+    "warmup_frames": 1,
+    "lpips_net": "vgg"
+  }
+}

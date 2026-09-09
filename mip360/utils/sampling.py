@@ -20,7 +20,11 @@ class OctreeNode:
 
 
 def build_octree(points, min_points=200, depth=0, center=None, root_size=None):
-    """Recursively split a point set until each leaf reaches ``min_points``."""
+    """Split until each leaf contains at most ``min_points`` points.
+
+    ``min_points`` is the historical internal name for the paper's octree
+    stopping threshold ``m``.  The public CLI calls it max-points-per-leaf.
+    """
 
     points = np.asarray(points)
     if depth == 0:
