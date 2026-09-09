@@ -163,11 +163,17 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--factor", type=int, default=1)
     parser.add_argument("--tile-order", "--order", choices=("tilecenter", "per_pixel"), default="tilecenter")
     parser.add_argument("--tile-size", type=int, choices=(8, 16), default=8)
-    parser.add_argument("--score-threshold", "--threshold", type=float, default=3e-3)
+    parser.add_argument("--score-threshold", "--threshold", type=float, default=5e-3)
     parser.add_argument("--warmup-cycles", type=int, default=3)
     parser.add_argument("--timed-cycles", type=int, default=3)
     parser.add_argument("--expected-views", type=int, default=0, help="Fail unless the split has this size; 0 disables the check.")
-    parser.add_argument("--min-points", type=int, default=10)
+    parser.add_argument(
+        "--max-points-per-leaf", "--min-points", "--min_points",
+        dest="max_points_per_leaf",
+        type=int,
+        default=10,
+        help="Octree leaf capacity; legacy --min-points spelling is retained for compatibility.",
+    )
     parser.add_argument("--feature-gating-beta", type=float, default=None)
     parser.add_argument("--feature-gating-temp", type=float, default=None)
     parser.add_argument("--device", default="cuda:0")
@@ -213,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     scene = evaluation._load_scene_tile_cuda(
         args.checkpoint,
         device,
-        args.min_points,
+        args.max_points_per_leaf,
         args.tile_size,
         args.feature_gating_beta,
         args.feature_gating_temp,
@@ -323,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             "split_mode": args.split_mode,
             "split_test_offset": args.split_test_offset,
             "factor": args.factor,
+            "max_points_per_leaf": args.max_points_per_leaf,
             "feature_gating_beta": scene.feature_gating_beta,
             "feature_gating_temperature": scene.feature_gating_temp,
             "feature_slots": scene.feature_slots,

@@ -9,8 +9,9 @@ and feature-aware interaction.
 
 [**Paper**](https://arxiv.org/abs/2606.03877) ·
 [**Project page**](https://www.shinjeongkim.com/mlp-splatting/) ·
-[**Interactive demo**](https://www.shinjeongkim.com/mlp-splatting/#interactive-demo) ·
-[**Checkpoint**](https://github.com/kxhit/mlp-splatting/releases/tag/v0.1.0)
+[**Teaser video**](https://www.shinjeongkim.com/mlp-splatting/static/videos/teaser.mp4) ·
+[**Interactive demo**](https://www.shinjeongkim.com/mlp-splatting/#visualization) ·
+[**Models & logs**](https://github.com/kxhit/mlp-splatting/releases/tag/v0.2.0)
 
 [![arXiv](https://img.shields.io/badge/arXiv-2606.03877-b31b1b.svg)](https://arxiv.org/abs/2606.03877)
 [![ECCV](https://img.shields.io/badge/ECCV-2026-6f42c1.svg)](https://www.shinjeongkim.com/mlp-splatting/)
@@ -21,25 +22,32 @@ and feature-aware interaction.
 
 </div>
 
-MLP Splatting represents a scene with a few expressive, spatially localized
-MLPs. Each primitive predicts radiance and opacity inside an anisotropic
-Gaussian support; optional feature distillation turns the same compact scene
-representation into an open-vocabulary interface for selection and editing.
+MLP Splatting represents a scene with a small set of spatially localized
+light-field MLPs. Each primitive predicts radiance and opacity within an
+anisotropic Gaussian support, combining the compactness of a neural field with
+independent, object-level control. Optional semantic feature distillation adds
+open-vocabulary selection, segmentation, and editing to the same representation.
 
-This release contains one canonical implementation: the feature-aware,
-tile-based CUDA renderer selected from the development branches and verified
-on both GPUs of our RTX 6000 Ada machine.
+This release distills the development code into one canonical feature-aware,
+tile-based CUDA path. Its primary Replica `room0` recipe uses the paper's
+`m=10` setting: **2,398 primitives and 36.2243 dB**, within **0.006 dB** of the
+paper's 36.23 dB result.
 
 ## Reproduce room0
 
-The fastest path verifies the released 1,344-primitive LSeg checkpoint on ten
-held-out Replica `room0` views. It reproduces **35.849 dB**, within 0.031 dB of
-the paper's **35.88 dB** result for the `m=20` ablation.
+The released checkpoint and recipe evaluate ten fixed held-out views from the
+Feature-3DGS Replica split. The default is the fastest tested fused RGB+feature
+configuration inside a 0.10 dB quality budget.
+
+| | Primitives | PSNR ↑ | Δ vs. paper |
+|---|---:|---:|---:|
+| Paper, `m=10` | 2,398 | 36.23 dB | — |
+| **This release** | **2,398** | **36.2243 dB** | **−0.0057 dB** |
 
 ### Installation
 
 You need Linux, Python 3.10+, an NVIDIA GPU, and a CUDA toolkit containing
-`nvcc`. The frozen benchmark environment used Python 3.11.14, PyTorch
+`nvcc`. The verified benchmark environment used Python 3.11.14, PyTorch
 2.9.0+cu128, torchvision 0.24.0+cu128, and CUDA toolkit 12.1.
 
 ```bash
@@ -60,9 +68,8 @@ python scripts/check_install.py
 ```
 
 The extension in `mip360/cuda/np_tile_kernels.cu` compiles lazily on the first
-render. Set `TORCH_EXTENSIONS_DIR` if you want to control its build cache.
-
-Install perceptual and semantic evaluation dependencies only when needed:
+render. Set `TORCH_EXTENSIONS_DIR` to choose its build cache. Perceptual and
+semantic evaluation have a separate dependency set:
 
 ```bash
 python -m pip install -r requirements-optional.txt
@@ -72,10 +79,10 @@ python -m pip install -r requirements-optional.txt
 
 Download the
 [Feature-3DGS processed Replica archive](https://drive.google.com/file/d/1sC2ZJUBRHKeWXXVUj7rIBEM-xaibvGw7/view?usp=sharing).
-Its scene folders use the expected COLMAP layout:
+The `room0` directory should have this layout:
 
 ```text
-<room0>/
+room0/
 ├── images/
 ├── sparse/0/
 │   ├── cameras.bin
@@ -84,9 +91,9 @@ Its scene folders use the expected COLMAP layout:
 └── rgb_feature_langseg/         # 512D LSeg features
 ```
 
-The checked-in recipe requires 80 ordered images and applies the Feature-3DGS
-split (`llffhold=8`, offset 2): 70 training views and 10 test views. A mismatch
-fails before training or evaluation rather than silently changing the protocol.
+The recipe requires 80 ordered images and applies the Feature-3DGS split
+(`llffhold=8`, offset 2): 70 training views and 10 test views. A mismatch fails
+before training or evaluation instead of silently changing the protocol.
 Please retain the terms and citation of the
 [Replica dataset](https://github.com/facebookresearch/Replica-Dataset).
 
@@ -95,72 +102,69 @@ Please retain the terms and citation of the
 ```bash
 mkdir -p checkpoints
 curl -L \
-  https://github.com/kxhit/mlp-splatting/releases/download/v0.1.0/room0_lseg512_tile8_60000_slots4.pt \
-  -o checkpoints/room0_lseg512_tile8_60000_slots4.pt
+  https://github.com/kxhit/mlp-splatting/releases/download/v0.2.0/room0_lseg512_tile8_60000_m10_slots4.pt \
+  -o checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt
 
-echo "9fc118ba64494351084b5f2779873fbccec9053bb438c07654f20c970ab12e29  checkpoints/room0_lseg512_tile8_60000_slots4.pt" \
+echo "dc49ba8de3eec72e6f8b5205501817b2a654c20fc5fd3dc8860167eb0aeb9f89  checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt" \
   | sha256sum --check
 
 bash scripts/reproduce_room0.sh \
   /path/to/room0 \
-  checkpoints/room0_lseg512_tile8_60000_slots4.pt
+  checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt
 ```
 
-The script runs the same portable command available directly at the repository
-root and checks both the ten-view manifest and a conservative PSNR interval:
+The checkpoint is 53,605,040 bytes. The script uses the public root entrypoint,
+checks the exact ten-view manifest, and requires PSNR in `[36.18, 36.27]` dB.
+The equivalent direct command is:
 
 ```bash
 python evaluate.py \
-  --config configs/replica/room0_lseg_fast.json \
+  --config configs/replica/room0_lseg.json \
   --data /path/to/room0 \
-  --checkpoint checkpoints/room0_lseg512_tile8_60000_slots4.pt \
+  --checkpoint checkpoints/room0_lseg512_tile8_60000_m10_slots4.pt \
   --disable-lpips \
-  --output results/room0_lseg_fast.json
+  --output results/room0_lseg.json
 ```
 
-## Training
+## Train
 
-Important entrypoints stay at the repository root; implementation details stay
-inside the package. `--output` is the exact run directory and receives a
-`resolved_config.json` plus all checkpoints.
-
-Paper-quality room0 recipe (`m=10`, paper target: 2,398 primitives / 36.23 dB):
+The two public experiment entrypoints live at the repository root. Dataset
+recipes live under `configs/`; models, loaders, and CUDA implementation details
+remain inside their packages. `--output` is the exact run directory and stores
+the resolved configuration alongside every checkpoint.
 
 ```bash
 python train.py \
   --config configs/replica/room0_lseg.json \
   --data /path/to/room0 \
-  --output outputs/room0_lseg_paper
+  --output outputs/room0_lseg
 ```
 
-Faster recipe matching the released checkpoint (`m=20`, 1,344 primitives):
+This recipe freezes the `m=10` / 2,398-primitive setup, 60,000 iterations, 8×8
+tile-center traversal, four-view tile mosaics, the Feature-3DGS split, optimizer
+values, and feature settings. Historical training runs store five feature
+tensors per primitive: one shared base plus four residuals, yielding four
+effective directional 512D slots. The deployment checkpoint above folds these
+losslessly into four direct slots.
 
-```bash
-python train.py \
-  --config configs/replica/room0_lseg_fast.json \
-  --data /path/to/room0 \
-  --output outputs/room0_lseg_fast
-```
-
-Both configs freeze 60,000 iterations, 8×8 tile-center traversal, four-view
-tile mosaics, four effective 512D feature slots (trained as a shared base plus
-four residual tensors), the data split, optimizer values, and evaluation
-settings. Command-line options override config values. Run
-`python train.py --help` for the full interface. Use `--feature-type none` for
-an RGB-only experiment.
-
-Evaluate a newly trained checkpoint with the matching recipe:
+Evaluate a newly trained checkpoint with the same recipe:
 
 ```bash
 python evaluate.py \
   --config configs/replica/room0_lseg.json \
   --data /path/to/room0 \
-  --checkpoint outputs/room0_lseg_paper/scene_epoch_60000.pt \
-  --output results/room0_lseg_paper.json
+  --checkpoint outputs/room0_lseg/scene_epoch_60000.pt \
+  --output results/room0_lseg_trained.json
 ```
 
-This computes image-wise PSNR, SSIM, LPIPS, and synchronized render FPS. Add
-`--disable-lpips` when only PSNR/SSIM and renderer timing are required.
+Evaluation reports image-wise PSNR, SSIM, LPIPS, and synchronized render FPS.
+Use `--disable-lpips` when only PSNR/SSIM and renderer timing are required.
+Command-line arguments override config values; run `python train.py --help` or
+`python evaluate.py --help` for the complete interfaces.
+
+The smaller `configs/replica/room0_lseg_fast.json` recipe is retained only to
+reproduce the paper's `m=20` compact ablation (1,344 primitives / 35.88 dB). It
+is not the main `m=10` reproduction.
 
 ## Semantic evaluation
 
@@ -171,7 +175,7 @@ not redistributed here.
 ```bash
 python mip360/eval_lseg_table2.py \
   --data_dir /path/to/room0 \
-  --scene_ckpt outputs/room0_lseg_paper/scene_epoch_60000.pt \
+  --scene_ckpt outputs/room0_lseg/scene_epoch_60000.pt \
   --factor 1 \
   --gt_mode semantic_png \
   --gt_semantic_dir /path/to/labels \
@@ -179,7 +183,7 @@ python mip360/eval_lseg_table2.py \
   --text_feature_pt /path/to/lseg_text_features.pt \
   --tile_order tilecenter \
   --tile_size 8 \
-  --score_threshold 3e-3 \
+  --score_threshold 5e-3 \
   --save_json results/room0_semantics.json
 ```
 
@@ -188,35 +192,35 @@ OpenAI CLIP dependency.
 
 ## Renderer selection
 
-We compared the clean feature renderer on physical GPU 0 and 1, both NVIDIA
-RTX 6000 Ada cards. Each result uses the same 638×478 `room0` checkpoint and ten
-fixed held-out views, with three complete warm-up cycles followed by three
-timed cycles per GPU and output mode.
+We benchmarked the 2,398-primitive checkpoint independently on physical GPU 0
+and GPU 1 of `bigboy`, both NVIDIA RTX 6000 Ada cards. Each result covers the
+same ten 638×478 held-out views, with three complete warm-up cycles followed by
+three timed cycles per GPU and output mode. The table reports the two-GPU mean.
 
 | Traversal | Tile | Threshold | PSNR ↑ | RGB FPS ↑ | RGB + feature FPS ↑ |
 |---|---:|---:|---:|---:|---:|
-| per-pixel | 16×16 | `3e-3` | **35.9023** | **61.26** | 11.83 |
-| **tile-center** | **8×8** | **`3e-3`** | **35.8490** | 28.28 | **12.53** |
-| tile-center, aggressive | 8×8 | `1e-2` | 35.6924 | 32.42 | 14.47 |
+| per-pixel reference | 16×16 | `1e-3` | **36.3095** | **32.0040** | 7.6644 |
+| **tile-center release** | **8×8** | **`5e-3`** | **36.2243** | 22.4804 | **10.1972** |
 
-The released default is tile-center / 8×8 / `3e-3`: fused feature inference is
-5.9% faster than the per-pixel quality reference for a 0.053 dB difference.
-RGB from the fused and RGB-only kernels was bit-exact in every run. These are
-engineering measurements on RTX 6000 Ada, not replacements for the paper's
-RTX 4090 tables.
+Tile-center / 8×8 / `5e-3` is the released feature-aware default: it improves
+fused RGB+feature throughput by **33.1% on average per GPU** while changing
+PSNR by **−0.0852 dB** relative to the per-pixel quality reference. Fused and
+RGB-only paths produced bit-exact RGB in every timed run. For RGB-only
+throughput, the per-pixel path is faster and remains available through the CLI.
 
-Raw per-frame timings, commands, source hashes, checkpoint hash, and hardware
-metadata are archived as a
-[release asset](https://github.com/kxhit/mlp-splatting/releases/download/v0.1.0/room0_rtx6000ada_benchmarks.zip)
-(SHA-256 `c10d070e765e7e3592c1581cd682c641927f1b34b209feb3bdf3f2e641788faa`)
-instead of living in the source tree.
+These measurements characterize RTX 6000 Ada execution and are not a direct
+replacement for the paper's RTX 4090 timing table. Raw per-frame timings,
+commands, source and checkpoint hashes, and hardware metadata are preserved in
+the
+[v0.2.0 benchmark archive](https://github.com/kxhit/mlp-splatting/releases/download/v0.2.0/room0_m10_rtx6000ada_benchmarks.zip),
+not in the source tree.
 
 ## Repository layout
 
 ```text
 train.py                         public training entrypoint
 evaluate.py                      public RGB evaluation entrypoint
-configs/replica/                 paper-quality and fast room0 recipes
+configs/replica/                 main and ablation room0 recipes
 mip360/                          model, trainer, evaluation, COLMAP loader
 └── cuda/np_tile_kernels.cu      feature-aware tile renderer
 replica/                         Replica-specific dataset loader
@@ -227,20 +231,23 @@ tests/                           CPU tests plus optional CUDA regressions
 
 ## Reproduction scope
 
-The released checkpoint path has been reproduced from a clean checkout on both
-GPUs: 10/10 expected views, 35.849 dB tile-center PSNR, bit-exact fused/RGB
-color, and successful CUDA regression tests. The `m=10` config records the
-paper-quality recipe, but a fresh 60k run has not yet been independently
-certified in this curated repository; do not cite it as a completed Table 1
-reproduction without running it.
+The numbers above are checkpoint-reproduction results from a clean checkout on
+both `bigboy` GPUs: 10/10 expected views, 36.2243 dB tile-center PSNR, and
+bit-exact fused/RGB color. A full quality pass measured 0.9606 SSIM and 0.09334
+LPIPS-VGG. A real one-iteration `m=10` training smoke test also
+loaded all 80 images and features, constructed the expected 70/10 split,
+initialized exactly 2,398 primitives, wrote a reloadable checkpoint, and
+evaluated a held-out view. A fresh 60k training run has not yet been
+independently repeated in this curated repository; do not present the released
+checkpoint evaluation as a newly trained result.
 
-Some values needed by historical checkpoints were not stated in the paper and
-are therefore labeled as frozen implementation defaults in
+Some historical implementation values are absent from the paper and are
+therefore frozen and labeled in
 [`configs/replica/README.md`](configs/replica/README.md). In particular, the
 released checkpoint uses attenuated-phase encoding (`sigma=0.01`) and recovered
-feature-gate constants (`beta=1.5`, temperature `2.0`). The current feature
-backward updates feature attributes; primitive geometry and appearance remain
-RGB-supervised.
+feature-gate constants (`beta=1.5`, temperature `2.0`). Feature loss updates
+feature attributes and the decoder; primitive geometry, opacity, and appearance
+remain RGB-supervised.
 
 Rendering is CUDA-only. Tile candidate capacities are checked explicitly and
 raise on overflow rather than truncating silently. Tile-center ordering is an

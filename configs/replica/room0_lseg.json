@@ -7,9 +7,18 @@
     "paper_room0_target": {
       "max_points_per_leaf": 10,
       "primitives": 2398,
+      "memory_mb": 56,
+      "fps": 8.0,
       "psnr_db": 36.23
     },
-    "note": "Split and unspecified implementation defaults are frozen by this repository; see configs/replica/README.md."
+    "verified_release": {
+      "primitives": 2398,
+      "mean_psnr_db": 36.224297,
+      "checkpoint_file": "room0_lseg512_tile8_60000_m10_slots4.pt",
+      "checkpoint_bytes": 53605040,
+      "checkpoint_sha256": "dc49ba8de3eec72e6f8b5205501817b2a654c20fc5fd3dc8860167eb0aeb9f89"
+    },
+    "note": "This is the primary room0 reproduction. Split and unspecified implementation defaults are frozen by this repository; see configs/replica/README.md."
   },
   "training": {
     "dataset": "replica",
@@ -52,7 +61,7 @@
     "expected_views": 10,
     "tile_order": "tilecenter",
     "tile_size": 8,
-    "score_threshold": 0.001,
+    "score_threshold": 0.005,
     "max_points_per_leaf": 10,
     "limit_frames": 0,
     "warmup_frames": 1,

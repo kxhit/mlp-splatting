@@ -9,7 +9,41 @@ from mip360.run import build_parser as build_train_parser
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MAIN_CONFIG = ROOT / "configs" / "replica" / "room0_lseg.json"
 FAST_CONFIG = ROOT / "configs" / "replica" / "room0_lseg_fast.json"
+
+
+def test_main_config_matches_verified_room0_release():
+    train_args = parse_args_with_config(
+        build_train_parser(),
+        ["--config", str(MAIN_CONFIG), "--data", "scene", "--output", "run"],
+        section="training",
+    )
+    assert train_args.dataset == "replica"
+    assert train_args.max_points_per_leaf == 10
+    assert train_args.num_epochs == 60_000
+    assert train_args.tile_order == "tilecenter"
+    assert train_args.tile_size == 8
+    assert train_args.feature_type == "lseg"
+    assert train_args.feature_slots == 5
+    assert train_args.expected_views == 70
+    assert train_args.expected_primitives == 2398
+
+    eval_args = parse_args_with_config(
+        build_eval_parser(),
+        [
+            "--config", str(MAIN_CONFIG),
+            "--data", "scene",
+            "--checkpoint", "scene.pt",
+        ],
+        section="evaluation",
+    )
+    assert eval_args.dataset_loader == "replica"
+    assert eval_args.max_points_per_leaf == 10
+    assert eval_args.expected_views == 10
+    assert eval_args.tile_order == "tilecenter"
+    assert eval_args.tile_size == 8
+    assert eval_args.score_threshold == pytest.approx(5e-3)
 
 
 def test_fast_config_drives_train_and_eval_defaults():
