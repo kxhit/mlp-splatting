@@ -199,11 +199,11 @@ three timed cycles per GPU and output mode. The table reports the two-GPU mean.
 
 | Traversal | Tile | Threshold | PSNR ↑ | RGB FPS ↑ | RGB + feature FPS ↑ |
 |---|---:|---:|---:|---:|---:|
-| per-pixel reference | 16×16 | `1e-3` | **36.3095** | **32.0040** | 7.6644 |
-| **tile-center release** | **8×8** | **`5e-3`** | **36.2243** | 22.4804 | **10.1972** |
+| per-pixel reference | 16×16 | `1e-3` | **36.3095** | **32.7092** | 7.6796 |
+| **tile-center release** | **8×8** | **`5e-3`** | **36.2243** | 22.4812 | **10.2083** |
 
 Tile-center / 8×8 / `5e-3` is the released feature-aware default: it improves
-fused RGB+feature throughput by **33.1% on average per GPU** while changing
+fused RGB+feature throughput by **32.9% on average per GPU** while changing
 PSNR by **−0.0852 dB** relative to the per-pixel quality reference. Fused and
 RGB-only paths produced bit-exact RGB in every timed run. For RGB-only
 throughput, the per-pixel path is faster and remains available through the CLI.
