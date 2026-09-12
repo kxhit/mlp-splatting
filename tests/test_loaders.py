@@ -173,3 +173,19 @@ def test_feature_tensor_is_normalized_to_hwc(loader_module, tmp_path, layout, sh
 
     assert feature.shape == (2, 3, 512)
     assert feature.dtype == torch.float32
+
+
+@pytest.mark.parametrize("loader_module", LOADER_MODULES)
+def test_feature_tensor_preserves_half_storage_dtype(loader_module, tmp_path):
+    path = tmp_path / "frame_fmap_CxHxW.pt"
+    source = torch.arange(512 * 2 * 3, dtype=torch.float16).reshape(512, 2, 3)
+    torch.save(source, path)
+
+    dataset = loader_module.mip360Dataset.__new__(loader_module.mip360Dataset)
+    dataset.images = torch.zeros((1, 3, 8, 12))
+    dataset.feature_type = "lseg"
+    dataset.feature_resize_to_image = False
+    feature = dataset._load_feature_tensor(str(path))
+
+    assert feature.shape == (2, 3, 512)
+    assert feature.dtype == torch.float16

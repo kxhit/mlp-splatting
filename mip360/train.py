@@ -629,6 +629,47 @@ class _TileMosaicFeaturePrefetcher:
         return feat
 
 
+def _assemble_feature_mosaic(
+    feature_views: list[torch.Tensor],
+    tile_view_map: torch.Tensor,
+) -> torch.Tensor:
+    """Select feature pixels without stacking every source feature map.
+
+    A dense ``torch.stack(feature_views)`` copies K complete HxWxC maps before
+    selecting one view per pixel.  Foundation-model features are large (LSeg
+    uses C=512), so copy only the rows that actually contribute to the mosaic.
+    """
+    if not feature_views:
+        raise ValueError("feature_views must contain at least one tensor")
+    reference = feature_views[0]
+    if reference.ndim != 3:
+        raise ValueError(f"feature views must have shape (H,W,C), got {tuple(reference.shape)}")
+    if tuple(tile_view_map.shape) != tuple(reference.shape[:2]):
+        raise ValueError(
+            f"tile_view_map must have shape {tuple(reference.shape[:2])}, "
+            f"got {tuple(tile_view_map.shape)}"
+        )
+    for feature in feature_views[1:]:
+        if feature.shape != reference.shape or feature.dtype != reference.dtype:
+            raise ValueError("all feature views must share shape and dtype")
+        if feature.device != reference.device:
+            raise ValueError("all feature views must be on the same device")
+    if tile_view_map.device != reference.device:
+        tile_view_map = tile_view_map.to(reference.device)
+    if tile_view_map.numel() and (
+        int(tile_view_map.min().item()) < 0
+        or int(tile_view_map.max().item()) >= len(feature_views)
+    ):
+        raise ValueError("tile_view_map contains an out-of-range view index")
+
+    mosaic = torch.empty_like(reference)
+    for view_index, feature in enumerate(feature_views):
+        mask = tile_view_map == view_index
+        if torch.any(mask):
+            mosaic[mask] = feature[mask]
+    return mosaic.contiguous()
+
+
 def _sample_tile_mosaic_batch(
     dataset,
     view_ids: torch.Tensor,
@@ -788,8 +829,7 @@ def _sample_tile_mosaic_batch(
         tile_view_hw = tile_view_grid.repeat_interleave(tile_size, dim=0).repeat_interleave(tile_size, dim=1)
         tile_view_hw = tile_view_hw[:Himg, :Wimg].contiguous()
 
-        feat_stack = torch.stack(feat_views, dim=0)  # (K, Hf, Wf, Cf)
-        Hf, Wf = int(feat_stack.shape[1]), int(feat_stack.shape[2])
+        Hf, Wf = int(feat_views[0].shape[0]), int(feat_views[0].shape[1])
         if Hf == Himg and Wf == Wimg:
             tile_view_feat = tile_view_hw
         else:
@@ -799,9 +839,7 @@ def _sample_tile_mosaic_batch(
                 mode="nearest",
             ).squeeze(0).squeeze(0).to(dtype=torch.long)
 
-        yy = torch.arange(Hf, dtype=torch.long).unsqueeze(1).expand(Hf, Wf)
-        xx = torch.arange(Wf, dtype=torch.long).unsqueeze(0).expand(Hf, Wf)
-        feat_hwc = feat_stack[tile_view_feat, yy, xx].contiguous()
+        feat_hwc = _assemble_feature_mosaic(feat_views, tile_view_feat)
 
     return rays_o_hw, rays_d_hw, rgbs_hw, feat_hwc, tile_view_local, tile_img_ids
 

@@ -13,6 +13,21 @@ MAIN_CONFIG = ROOT / "configs" / "replica" / "room0_lseg.json"
 FAST_CONFIG = ROOT / "configs" / "replica" / "room0_lseg_fast.json"
 
 
+def test_tile8_uses_optimized_cuda_specialization(monkeypatch):
+    from mip360 import cumodel
+
+    monkeypatch.delenv("MLPSP_NVCC_MAXRREGCOUNT", raising=False)
+
+    _key, _name, flags = cumodel._tile_ext_build_config(8)
+    assert flags == [
+        "-DMLPSP_TILECENTER_BLOCK_THREADS=64",
+        "-DMLPSP_BACKWARD_RECOMPUTE_GEOMETRY=1",
+        "-DMLPSP_TILECENTER_MAX_HITS=128",
+        "-DMLPSP_BACKWARD_MIN_BLOCKS_PER_SM=8",
+    ]
+    assert cumodel._tile_ext_build_config(16)[2] == []
+
+
 def test_main_config_matches_verified_room0_release():
     train_args = parse_args_with_config(
         build_train_parser(),
@@ -26,6 +41,7 @@ def test_main_config_matches_verified_room0_release():
     assert train_args.tile_size == 8
     assert train_args.feature_type == "lseg"
     assert train_args.feature_slots == 5
+    assert train_args.preload_features is True
     assert train_args.expected_views == 70
     assert train_args.expected_primitives == 2398
 

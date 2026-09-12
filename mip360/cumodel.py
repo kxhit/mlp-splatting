@@ -91,23 +91,74 @@ except Exception as e:  # noqa: BLE001
     _tile_error = str(e)
 
 
-def _tile_ext_build_config():
-    """Build key/name/flags for tile CUDA extension, with optional maxrregcount tuning."""
-    maxrreg_raw = os.environ.get("MLPSP_NVCC_MAXRREGCOUNT", "").strip()
+def _tile_ext_build_config(tile_size: int | None = None):
+    """Build the CUDA extension configuration for the requested tile size.
+
+    An 8x8 tile has exactly 64 pixels.  The optimized public path therefore
+    uses one thread per pixel and the occupancy-safe backward specialization.
+    Tile-size 16 retains the legacy 256-thread/512-hit specialization.
+    """
+    if tile_size is not None and int(tile_size) not in {8, 16}:
+        raise ValueError("tile_size must be 8 or 16")
     extra_cuda_cflags = []
-    suffix = "default"
+    suffix_parts = []
+    if tile_size == 8:
+        extra_cuda_cflags.extend(
+            [
+                "-DMLPSP_TILECENTER_BLOCK_THREADS=64",
+                "-DMLPSP_BACKWARD_RECOMPUTE_GEOMETRY=1",
+                "-DMLPSP_TILECENTER_MAX_HITS=128",
+                "-DMLPSP_BACKWARD_MIN_BLOCKS_PER_SM=8",
+            ]
+        )
+        suffix_parts.append("tile8")
+
+    maxrreg_raw = os.environ.get("MLPSP_NVCC_MAXRREGCOUNT", "").strip()
     if maxrreg_raw:
         try:
             maxrreg = int(maxrreg_raw)
             if maxrreg > 0:
                 extra_cuda_cflags.append(f"-maxrregcount={maxrreg}")
-                suffix = f"rreg{maxrreg}"
+                suffix_parts.append(f"rreg{maxrreg}")
         except ValueError:
             # Ignore invalid values and fall back to default compile options.
             pass
+    suffix = "_".join(suffix_parts) if suffix_parts else "default"
     name = f"np_tile_kernels_{suffix}"
     key = (name, tuple(extra_cuda_cflags))
     return key, name, extra_cuda_cflags
+
+
+def _overlap_matrix_to_sparse(
+    overlap_matrix: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert a dense tile/primitive mask to row-major CSR-style lists.
+
+    ``torch.nonzero`` returns indices in lexicographic order, with the last
+    dimension changing fastest.  For a two-dimensional tile/primitive mask,
+    candidates are therefore already grouped by tile and ordered by primitive;
+    sorting those pairs again is redundant and adds several GPU launches.
+    """
+    if overlap_matrix.ndim != 2:
+        raise ValueError(
+            "overlap_matrix must have shape (num_tiles, num_primitives), "
+            f"got {tuple(overlap_matrix.shape)}"
+        )
+
+    num_tiles = int(overlap_matrix.shape[0])
+    pairs = overlap_matrix.nonzero(as_tuple=False)
+    if pairs.numel() == 0:
+        return (
+            torch.empty(0, dtype=torch.int32, device=overlap_matrix.device),
+            torch.zeros(num_tiles + 1, dtype=torch.int32, device=overlap_matrix.device),
+        )
+
+    candidates = pairs[:, 1].to(dtype=torch.int32)
+    counts = overlap_matrix.sum(dim=1, dtype=torch.int32)
+    offsets = torch.empty(num_tiles + 1, dtype=torch.int32, device=overlap_matrix.device)
+    offsets[0] = 0
+    torch.cumsum(counts, dim=0, out=offsets[1:])
+    return candidates, offsets
 
 class IntegratedPositionalEncoding(nn.Module):
     def __init__(self, in_dim=6, num_frequencies=10, sigma=0.01):
@@ -210,7 +261,7 @@ class _TileRenderAutogradFn(torch.autograd.Function):
         mode: int,
         bg_color: torch.Tensor | None,
     ):
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(TW)
 
         if mode == 0:
             rgb, alpha = ext.render_tiles_forward(
@@ -270,7 +321,7 @@ class _TileRenderAutogradFn(torch.autograd.Function):
                 bg = bg.repeat(3)
             grad_T_end = (grad_out_rgb * bg.view(1, 3)).sum(dim=-1)
 
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(ctx.TW)
         chunk_size = int(os.environ.get("MLPSP_BWD_CHUNK", "65536"))
 
         if ctx.mode == 0:
@@ -374,7 +425,11 @@ class _TileRenderWithFeatAutogradFn(torch.autograd.Function):
         threshold: float,
         bg_color: torch.Tensor | None,
     ):
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        # Keep unused outputs as ``None`` in backward. Materializing an unused
+        # RGB gradient as a dense zero tensor would launch the full MLP and
+        # geometry backward kernel during feature-only supervision.
+        ctx.set_materialize_grads(False)
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(TW)
         rgb, alpha, feat = ext.render_tiles_forward_tilecenter_with_feat(
             rays_o, rays_d, positions, log_scales, quats,
             culled_prim_indices, tile_offsets,
@@ -412,18 +467,15 @@ class _TileRenderWithFeatAutogradFn(torch.autograd.Function):
          culled_prim_indices, tile_offsets,
          freq, att, W1, b1, W2, b2, W3, b3, feat_attr) = ctx.saved_tensors
 
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(ctx.TW)
         B = rays_o.shape[0]
 
-        grad_positions = torch.zeros_like(positions)
-        grad_log_scales = torch.zeros_like(log_scales)
-        grad_quats = torch.zeros_like(quats)
-        grad_W1 = torch.zeros_like(W1)
-        grad_b1 = torch.zeros_like(b1)
-        grad_W2 = torch.zeros_like(W2)
-        grad_b2 = torch.zeros_like(b2)
-        grad_W3 = torch.zeros_like(W3)
-        grad_b3 = torch.zeros_like(b3)
+        # Feature gradients are intentionally stopped at ``feat_attr``. Keep
+        # unrelated gradients as None until RGB actually participates in the
+        # loss; dense zeros trigger needless allocation and accumulation when a
+        # separate feature-only pass shares these parameters with the RGB pass.
+        grad_positions = grad_log_scales = grad_quats = None
+        grad_W1 = grad_b1 = grad_W2 = grad_b2 = grad_W3 = grad_b3 = None
         grad_feat_attr = None
 
         if grad_out_rgb is not None:
@@ -489,7 +541,8 @@ class _TileRenderWithFeatPerPixelAutogradFn(torch.autograd.Function):
         threshold: float,
         bg_color: torch.Tensor | None,
     ):
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        ctx.set_materialize_grads(False)
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(TW)
         rgb, alpha, feat = ext.render_tiles_forward_per_pixel_with_feat(
             rays_o, rays_d, positions, log_scales, quats,
             culled_prim_indices, tile_offsets,
@@ -527,18 +580,11 @@ class _TileRenderWithFeatPerPixelAutogradFn(torch.autograd.Function):
          culled_prim_indices, tile_offsets,
          freq, att, W1, b1, W2, b2, W3, b3, feat_attr) = ctx.saved_tensors
 
-        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static()
+        ext = NeuralPrimitiveSceneTileCUDA._ensure_tile_ext_static(ctx.TW)
         B = rays_o.shape[0]
 
-        grad_positions = torch.zeros_like(positions)
-        grad_log_scales = torch.zeros_like(log_scales)
-        grad_quats = torch.zeros_like(quats)
-        grad_W1 = torch.zeros_like(W1)
-        grad_b1 = torch.zeros_like(b1)
-        grad_W2 = torch.zeros_like(W2)
-        grad_b2 = torch.zeros_like(b2)
-        grad_W3 = torch.zeros_like(W3)
-        grad_b3 = torch.zeros_like(b3)
+        grad_positions = grad_log_scales = grad_quats = None
+        grad_W1 = grad_b1 = grad_W2 = grad_b2 = grad_W3 = grad_b3 = None
         grad_feat_attr = None
 
         if grad_out_rgb is not None:
@@ -791,17 +837,17 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
         return mode
 
     def _ensure_tile_ext(self):
-        return self._ensure_tile_ext_static()
+        return self._ensure_tile_ext_static(self.tile_size)
 
     @staticmethod
-    def _ensure_tile_ext_static():
+    def _ensure_tile_ext_static(tile_size: int | None = None):
         global _tile_ext, _tile_ext_key
         if _tile_ext is None:
             if _tile_error is not None and _tile_error.startswith('Tile CUDA source missing'):
                 raise RuntimeError(_tile_error)
             if '_tile_src_path' not in globals() or _tile_src_path is None:
                 raise RuntimeError(f"Tile CUDA not available: {_tile_error}")
-            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            key, name, extra_cuda_cflags = _tile_ext_build_config(tile_size)
             _tile_ext = _safe_load_extension(
                 load_ext,
                 name=name,
@@ -811,7 +857,7 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             )
             _tile_ext_key = key
         else:
-            key, name, extra_cuda_cflags = _tile_ext_build_config()
+            key, name, extra_cuda_cflags = _tile_ext_build_config(tile_size)
             if _tile_ext_key != key:
                 _tile_ext = _safe_load_extension(
                     load_ext,
@@ -1028,23 +1074,7 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             tile_order_mode = self._resolve_tile_order_mode()
             use_tilecenter = tile_order_mode == "tilecenter"
 
-            tile_prim_pairs = overlap_matrix.nonzero(as_tuple=False)
-            if tile_prim_pairs.numel() == 0:
-                # Handle case with no intersections
-                culled_prim_indices = torch.empty(0, dtype=torch.int32, device=device)
-                tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.int32, device=device)
-            else:
-                sorted_indices = torch.argsort(tile_prim_pairs[:, 0])
-                sorted_pairs = tile_prim_pairs[sorted_indices]
-
-                tile_ids = sorted_pairs[:, 0]
-                culled_prim_indices = sorted_pairs[:, 1].to(torch.int32)
-
-                # Build offsets array
-                tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.long, device=device)
-                unique_tile_ids, counts = torch.unique_consecutive(tile_ids, return_counts=True)
-                tile_offsets.scatter_add_(0, unique_tile_ids + 1, counts)
-                tile_offsets = torch.cumsum(tile_offsets, dim=0).to(torch.int32)
+            culled_prim_indices, tile_offsets = _overlap_matrix_to_sparse(overlap_matrix)
 
         tile_order_mode = self._resolve_tile_order_mode()
         use_tilecenter = tile_order_mode == "tilecenter"
@@ -1257,20 +1287,7 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             raise RuntimeError("render_rgb_alpha_no_grad currently supports MLPSP_TILE_ORDER=tilecenter only.")
 
         # Convert overlap matrix to sorted sparse format for kernel
-        tile_prim_pairs = overlap_matrix.nonzero(as_tuple=False)
-        if tile_prim_pairs.numel() == 0:
-            culled_prim_indices = torch.empty(0, dtype=torch.int32, device=device)
-            tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.int32, device=device)
-        else:
-            sorted_indices = torch.argsort(tile_prim_pairs[:, 0])
-            sorted_pairs = tile_prim_pairs[sorted_indices]
-            tile_ids = sorted_pairs[:, 0]
-            culled_prim_indices = sorted_pairs[:, 1].to(torch.int32)
-
-            tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.long, device=device)
-            unique_tile_ids, counts = torch.unique_consecutive(tile_ids, return_counts=True)
-            tile_offsets.scatter_add_(0, unique_tile_ids + 1, counts)
-            tile_offsets = torch.cumsum(tile_offsets, dim=0).to(torch.int32)
+        culled_prim_indices, tile_offsets = _overlap_matrix_to_sparse(overlap_matrix)
 
         # --- 2. Kernel call (no autograd) ---
         ext = self._ensure_tile_ext()
@@ -1430,20 +1447,7 @@ class NeuralPrimitiveSceneTileCUDA(nn.Module):
             if not use_tilecenter:
                 raise RuntimeError("render_rgb_t_no_grad requires MLPSP_TILE_ORDER=tilecenter (depth output is implemented for tilecenter path).")
 
-            tile_prim_pairs = overlap_matrix.nonzero(as_tuple=False)
-            if tile_prim_pairs.numel() == 0:
-                culled_prim_indices = torch.empty(0, dtype=torch.int32, device=device)
-                tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.int32, device=device)
-            else:
-                sorted_indices = torch.argsort(tile_prim_pairs[:, 0])
-                sorted_pairs = tile_prim_pairs[sorted_indices]
-                tile_ids = sorted_pairs[:, 0]
-                culled_prim_indices = sorted_pairs[:, 1].to(torch.int32)
-
-                tile_offsets = torch.zeros(num_tiles + 1, dtype=torch.long, device=device)
-                unique_tile_ids, counts = torch.unique_consecutive(tile_ids, return_counts=True)
-                tile_offsets.scatter_add_(0, unique_tile_ids + 1, counts)
-                tile_offsets = torch.cumsum(tile_offsets, dim=0).to(torch.int32)
+            culled_prim_indices, tile_offsets = _overlap_matrix_to_sparse(overlap_matrix)
 
             # --- 2. Kernel Call (tilecenter, no autograd, with t) ---
             ext = self._ensure_tile_ext()

@@ -37,6 +37,40 @@ __device__ __forceinline__ void atomicMaxFloatPos(float* addr, float val) {
 #define MLPSP_MAX_H 32
 #endif
 
+#ifndef MLPSP_TILECENTER_BLOCK_THREADS
+#define MLPSP_TILECENTER_BLOCK_THREADS 256
+#endif
+
+#ifndef MLPSP_BACKWARD_RECOMPUTE_GEOMETRY
+#define MLPSP_BACKWARD_RECOMPUTE_GEOMETRY 0
+#endif
+
+#ifndef MLPSP_TILECENTER_MAX_HITS
+#define MLPSP_TILECENTER_MAX_HITS 512
+#endif
+
+#ifndef MLPSP_BACKWARD_MIN_BLOCKS_PER_SM
+#define MLPSP_BACKWARD_MIN_BLOCKS_PER_SM 2
+#endif
+
+static_assert(
+    MLPSP_TILECENTER_BLOCK_THREADS == 64 || MLPSP_TILECENTER_BLOCK_THREADS == 128 ||
+        MLPSP_TILECENTER_BLOCK_THREADS == 256,
+    "MLPSP_TILECENTER_BLOCK_THREADS must be 64, 128, or 256");
+static_assert(
+    MLPSP_MAX_TILE_PRIMS % MLPSP_TILECENTER_BLOCK_THREADS == 0,
+    "MLPSP_MAX_TILE_PRIMS must be divisible by MLPSP_TILECENTER_BLOCK_THREADS");
+static_assert(
+    MLPSP_BACKWARD_RECOMPUTE_GEOMETRY == 0 || MLPSP_BACKWARD_RECOMPUTE_GEOMETRY == 1,
+    "MLPSP_BACKWARD_RECOMPUTE_GEOMETRY must be 0 or 1");
+static_assert(
+    MLPSP_TILECENTER_MAX_HITS == 128 || MLPSP_TILECENTER_MAX_HITS == 256 ||
+        MLPSP_TILECENTER_MAX_HITS == 512,
+    "MLPSP_TILECENTER_MAX_HITS must be 128, 256, or 512");
+static_assert(
+    MLPSP_BACKWARD_MIN_BLOCKS_PER_SM == 2 || MLPSP_BACKWARD_MIN_BLOCKS_PER_SM == 4 ||
+        MLPSP_BACKWARD_MIN_BLOCKS_PER_SM == 6 || MLPSP_BACKWARD_MIN_BLOCKS_PER_SM == 8,
+    "MLPSP_BACKWARD_MIN_BLOCKS_PER_SM must be 2, 4, 6, or 8");
 // EN: Fast sigmoid approximation/helper used in MLP output activation.
 __device__ __forceinline__ float fast_sigmoid(float x) {
   return 1.0f / (1.0f + __expf(-x));
@@ -1864,11 +1898,11 @@ __global__ void render_tiles_kernel_tilecenter_order(
     return;
   }
 
-  // Block-level radix sort uses a fixed 256-thread block; only the first TW*TH threads map to pixels
-  // while the remaining threads participate in sort/staging work.
+  // Block-level radix sort uses the configured block size. Threads beyond TW*TH
+  // participate only in sort/staging work.
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
-  constexpr int BLOCK_THREADS = 256;
-  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS; // 3
+  constexpr int BLOCK_THREADS = MLPSP_TILECENTER_BLOCK_THREADS;
+  constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
 
   __shared__ int s_pid[MAX_TILE_PRIMS];
@@ -2880,7 +2914,7 @@ __global__ void render_tiles_backward_emit_tilecenter(
 template <typename WType>
 // EN: Full tile-center backward kernel computing MLP and geometry gradients in one pass.
 // The only effective backward kernel for tilecenter mode.
-__global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
+__global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, MLPSP_BACKWARD_MIN_BLOCKS_PER_SM) void render_tiles_backward_tilecenter_full(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
     const float* __restrict__ pos,
@@ -2904,7 +2938,8 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     float* __restrict__ grad_W3, float* __restrict__ grad_b3,
     float* __restrict__ grad_positions,
     float* __restrict__ grad_log_scales,
-    float* __restrict__ grad_quats)
+    float* __restrict__ grad_quats,
+    int32_t* __restrict__ hit_overflow)
 {
   const int tile_x = blockIdx.x;
   const int tile_y = blockIdx.y;
@@ -2951,7 +2986,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   if (tile_len <= 0) return;
 
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
-  constexpr int BLOCK_THREADS = 256;
+  constexpr int BLOCK_THREADS = MLPSP_TILECENTER_BLOCK_THREADS;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
@@ -3021,12 +3056,14 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   }
   __syncthreads();
 
-  constexpr int MAX_HITS = 512;
+  constexpr int MAX_HITS = MLPSP_TILECENTER_MAX_HITS;
   float trans_arr[MAX_HITS];
   int prim_arr[MAX_HITS];
+#if !MLPSP_BACKWARD_RECOMPUTE_GEOMETRY
   float dx_arr[MAX_HITS];
   float dy_arr[MAX_HITS];
   float dz_arr[MAX_HITS];
+#endif
 
   float trans = 1.f;
   int used = 0;
@@ -3067,9 +3104,11 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
 
       trans_arr[used] = trans;
       prim_arr[used] = p;
+#if !MLPSP_BACKWARD_RECOMPUTE_GEOMETRY
       dx_arr[used] = dx;
       dy_arr[used] = dy;
       dz_arr[used] = dz;
+#endif
 
       trans *= (1.f - alpha);
       used++;
@@ -3079,6 +3118,9 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   for (int i = 0; i < load_n; ++i) {
     const int p = s_pid[i];
     if (p >= 0 && p < N) process_prim(p);
+#if MLPSP_TILECENTER_MAX_HITS < 512
+    if (valid_pix && trans >= 1e-3f && used >= MAX_HITS) atomicExch(hit_overflow, 1);
+#endif
     const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
     if (__syncthreads_or(active) == 0 || used >= MAX_HITS) break;
   }
@@ -3087,6 +3129,9 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
       const int p = (int)culled_prim_indices[i];
       if (p < 0 || p >= N) continue;
       process_prim(p);
+#if MLPSP_TILECENTER_MAX_HITS < 512
+      if (valid_pix && trans >= 1e-3f && used >= MAX_HITS) atomicExch(hit_overflow, 1);
+#endif
       const int active = (valid_pix && (trans >= 1e-3f)) ? 1 : 0;
       if (__syncthreads_or(active) == 0 || used >= MAX_HITS) break;
     }
@@ -3099,9 +3144,37 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
   for (int i = used - 1; i >= 0; --i) {
     const float trans_i = trans_arr[i];
     const int p = prim_arr[i];
+#if MLPSP_BACKWARD_RECOMPUTE_GEOMETRY
+    const float cx = pos[p*3+0];
+    const float cy = pos[p*3+1];
+    const float cz = pos[p*3+2];
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+    float t_recomputed, dx, dy, dz, qlx_unused, qly_unused, qlz_unused, decay_unused;
+    if (!hit_and_features_rot(
+            rox, roy, roz, rdx, rdy, rdz,
+            cx, cy, cz, lgx, lgy, lgz, qw, qx, qy, qz, thr,
+            t_recomputed, dx, dy, dz,
+            qlx_unused, qly_unused, qlz_unused, decay_unused)) {
+      continue;
+    }
+#else
     const float dx = dx_arr[i];
     const float dy = dy_arr[i];
     const float dz = dz_arr[i];
+    const float lgx = log_scales[p*3+0];
+    const float lgy = log_scales[p*3+1];
+    const float lgz = log_scales[p*3+2];
+    const float qw  = quats[p*4+0];
+    const float qx  = quats[p*4+1];
+    const float qy  = quats[p*4+2];
+    const float qz  = quats[p*4+3];
+#endif
     const float3 d = make_float3(dx, dy, dz);
 
     const float v6[6] = {rdx, rdy, rdz, dx, dy, dz};
@@ -3112,13 +3185,6 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
     const WType* W3p = W3 + (size_t)p * 4 * H;
     const WType* b3p = b3 + (size_t)p * 4;
 
-    const float lgx = log_scales[p*3+0];
-    const float lgy = log_scales[p*3+1];
-    const float lgz = log_scales[p*3+2];
-    const float qw  = quats[p*4+0];
-    const float qx  = quats[p*4+1];
-    const float qy  = quats[p*4+2];
-    const float qz  = quats[p*4+3];
     // local coords: qloc = R^T d  (conjugate rotation)
     const float3 qloc = quat_rotate_conj(qw, qx, qy, qz, d);
     const float qlx = qloc.x;
@@ -3322,7 +3388,7 @@ __global__ __launch_bounds__(256, 2) void render_tiles_backward_tilecenter_full(
 }
 
 // Backward (tilecenter): feat_attr-only gradient accumulation without global hit-list buffers.
-__global__ void render_tiles_backward_featattr_tilecenter(
+__global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, 2) void render_tiles_backward_featattr_tilecenter(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
     const float* __restrict__ pos,
@@ -3383,7 +3449,7 @@ __global__ void render_tiles_backward_featattr_tilecenter(
   const float crdz = rays_d[pix_c*3+2];
 
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
-  constexpr int BLOCK_THREADS = 256;
+  constexpr int BLOCK_THREADS = MLPSP_TILECENTER_BLOCK_THREADS;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   __shared__ int s_pid[MAX_TILE_PRIMS];
   using BlockRadixSortT = cub::BlockRadixSort<float, BLOCK_THREADS, ITEMS_PER_THREAD, int>;
@@ -4369,6 +4435,17 @@ static inline void check_per_pixel_intersection_overflow(
               "refusing to return a silently truncated result");
 }
 
+static inline void check_tilecenter_backward_hit_overflow(
+    const torch::Tensor& overflow,
+    const char* path_name)
+{
+  auto overflow_cpu = overflow.cpu();
+  TORCH_CHECK(overflow_cpu.data_ptr<int32_t>()[0] == 0,
+              path_name, ": tile-center backward hit capacity ",
+              MLPSP_TILECENTER_MAX_HITS,
+              " reached before transmittance termination; refusing to return truncated gradients");
+}
+
 
 // Internal test hook for masks whose equal-address lanes are non-contiguous.
 __global__ void test_atomic_add_warp_agg_kernel(
@@ -4544,8 +4621,9 @@ public:
         int64_t TW, int64_t TH,
         double threshold)
     {
-        // This kernel uses a CUB BlockRadixSort specialization that assumes 256 threads per block.
-        TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+        // CUB's block primitives require the launch size to match the compiled specialization.
+        TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                    "Tile-center order kernel requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
 
         TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
         TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
@@ -4573,15 +4651,14 @@ public:
         auto rgb = torch::zeros({B, 3}, opts_f);
         auto alpha = torch::zeros({B, 1}, opts_f);
 
-        // Tile-center order kernel uses a 1D block (TW*TH threads) so CUB block primitives work correctly.
-        dim3 block(256, 1, 1);
+        dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
         dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
 
         const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
         const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
         const size_t shared_bytes = (size_t)shared_floats * sizeof(float);
 
-        render_tiles_kernel_tilecenter_order<<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
+        render_tiles_kernel_tilecenter_order<float><<<grid, block, shared_bytes, at::cuda::getCurrentCUDAStream()>>>(
             rays_o.data_ptr<float>(),
             rays_d.data_ptr<float>(),
             positions.data_ptr<float>(),
@@ -4842,7 +4919,6 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_wrapper(
     TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
     TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
     TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
-
     const int64_t B = rays_o.size(0);
     TORCH_CHECK(B == (Wimg * Himg), "B must equal W*H for tile renderer");
     validate_tile_candidate_capacity(
@@ -4995,7 +5071,8 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                "Tile-center order kernel requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5033,7 +5110,7 @@ std::tuple<torch::Tensor, torch::Tensor> render_tiles_forward_tilecenter_wrapper
     auto rgb = torch::zeros({B, 3}, opts_f);
     auto alpha = torch::zeros({B, 1}, opts_f);
 
-    dim3 block(256, 1, 1);
+    dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     const int Hcap = (int)(Hh > MLPSP_MAX_H ? MLPSP_MAX_H : Hh);
     const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
@@ -5546,7 +5623,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     return {rgb, alpha, t};
 }
 
-__global__ void render_tiles_kernel_tilecenter_order_with_feat(
+__global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, 2) void render_tiles_kernel_tilecenter_order_with_feat(
     const float* __restrict__ rays_o,
     const float* __restrict__ rays_d,
     const float* __restrict__ pos,
@@ -5623,7 +5700,7 @@ __global__ void render_tiles_kernel_tilecenter_order_with_feat(
   }
 
   constexpr int MAX_TILE_PRIMS = MLPSP_MAX_TILE_PRIMS;
-  constexpr int BLOCK_THREADS = 256;
+  constexpr int BLOCK_THREADS = MLPSP_TILECENTER_BLOCK_THREADS;
   constexpr int ITEMS_PER_THREAD = MAX_TILE_PRIMS / BLOCK_THREADS;
   static_assert(MAX_TILE_PRIMS % BLOCK_THREADS == 0, "MAX_TILE_PRIMS must be divisible by BLOCK_THREADS");
 
@@ -5886,7 +5963,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                "Tile-center feature kernel requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -5927,7 +6005,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> render_tiles_forward_til
     auto alpha = torch::zeros({B, 1}, opts_f);
     auto feat  = torch::zeros({B, Cfeat}, opts_f);
 
-    dim3 block(256, 1, 1);
+    dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     const int Hcap = (int)(Hh > 64 ? 64 : Hh);
     const int shared_floats = Hcap * (int)IN + Hcap + Hcap * Hcap + Hcap + 4 * Hcap + 4;
@@ -6043,7 +6121,8 @@ torch::Tensor render_tiles_backward_count_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256,
+                "Tile-center count kernel currently supports 0 < TW*TH <= 256");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -6307,7 +6386,8 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                "Tile-center feature backward requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -6349,7 +6429,7 @@ torch::Tensor render_tiles_backward_featattr_tilecenter_wrapper(
     auto grad_feat_attr = (feat_slots == 1)
         ? torch::zeros({N, Cfeat}, rays_o.options().dtype(at::kFloat))
         : torch::zeros({N, feat_slots, Cfeat}, rays_o.options().dtype(at::kFloat));
-    dim3 block(256, 1, 1);
+    dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     render_tiles_backward_featattr_tilecenter<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -6494,7 +6574,8 @@ render_tiles_backward_tilecenter_full_wrapper(
     int64_t TW, int64_t TH,
     double threshold)
 {
-    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= 256, "Tile-center order kernel currently supports 0 < TW*TH <= 256");
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                "Tile-center backward kernel requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
     TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
     TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
     TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
@@ -6541,8 +6622,14 @@ render_tiles_backward_tilecenter_full_wrapper(
     auto grad_positions = torch::zeros({N, 3}, opts_f);
     auto grad_log_scales = torch::zeros({N, 3}, opts_f);
     auto grad_quats = torch::zeros({N,4}, opts_f);
+#if MLPSP_TILECENTER_MAX_HITS < 512
+    auto hit_overflow = torch::zeros({1}, tile_offsets.options());
+    int32_t* hit_overflow_ptr = hit_overflow.data_ptr<int32_t>();
+#else
+    int32_t* hit_overflow_ptr = nullptr;
+#endif
 
-    dim3 block(256, 1, 1);
+    dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     if (W1.scalar_type() == at::kFloat) {
       render_tiles_backward_tilecenter_full<float><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -6569,7 +6656,8 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
         grad_positions.data_ptr<float>(),
         grad_log_scales.data_ptr<float>(),
-        grad_quats.data_ptr<float>());
+        grad_quats.data_ptr<float>(),
+        hit_overflow_ptr);
     } else if (W1.scalar_type() == at::kHalf) {
       render_tiles_backward_tilecenter_full<__half><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -6595,7 +6683,8 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
         grad_positions.data_ptr<float>(),
         grad_log_scales.data_ptr<float>(),
-        grad_quats.data_ptr<float>());
+        grad_quats.data_ptr<float>(),
+        hit_overflow_ptr);
     } else {
       render_tiles_backward_tilecenter_full<__nv_bfloat16><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
@@ -6621,9 +6710,13 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
         grad_positions.data_ptr<float>(),
         grad_log_scales.data_ptr<float>(),
-        grad_quats.data_ptr<float>());
+        grad_quats.data_ptr<float>(),
+        hit_overflow_ptr);
     }
     AT_CUDA_CHECK(cudaGetLastError());
+#if MLPSP_TILECENTER_MAX_HITS < 512
+    check_tilecenter_backward_hit_overflow(hit_overflow, "render_tiles_backward_tilecenter_full");
+#endif
     return {grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3, grad_positions, grad_log_scales, grad_quats};
 }
 

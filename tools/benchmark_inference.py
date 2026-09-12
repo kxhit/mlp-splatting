@@ -176,6 +176,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--feature-gating-beta", type=float, default=None)
     parser.add_argument("--feature-gating-temp", type=float, default=None)
+    parser.add_argument(
+        "--outputs",
+        choices=("rgb", "all"),
+        default="all",
+        help="Benchmark RGB only, or both RGB and fused RGB+feature rendering.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--ray-cache-size", type=int, default=16)
     parser.add_argument("--feature-cache-size", type=int, default=16)
@@ -225,9 +231,8 @@ def main(argv: list[str] | None = None) -> int:
         args.feature_gating_temp,
     )
     scene.tile_order_mode_override = args.tile_order
-    if scene.feat_attr is None:
+    if args.outputs == "all" and scene.feat_attr is None:
         raise RuntimeError("checkpoint has no feature attributes; fused feature timing is unavailable")
-
     frames = []
     targets = []
     identities = []
@@ -250,7 +255,11 @@ def main(argv: list[str] | None = None) -> int:
         targets.append(target)
         identities.append(evaluation._get_frame_identity(dataset, index))
 
-    for return_feature in (False, True):
+    render_modes = [(False, "rgb_only")]
+    if args.outputs == "all":
+        render_modes.append((True, "rgb_feature"))
+
+    for return_feature, _ in render_modes:
         for _ in range(args.warmup_cycles):
             for frame in frames:
                 prediction, _, _, _ = _render(scene, frame, args.score_threshold, return_feature)
@@ -258,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results = {}
     rgb_reference: list[torch.Tensor] = []
-    for return_feature, label in ((False, "rgb_only"), (True, "rgb_feature")):
+    for return_feature, label in render_modes:
         wall_times: list[float] = []
         cuda_times: list[float] = []
         first_cycle_predictions = []
@@ -334,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
             "feature_gating_temperature": scene.feature_gating_temp,
             "feature_slots": scene.feature_slots,
             "feature_dimension": scene.feature_dim_low,
+            "outputs": args.outputs,
         },
         "hardware": {
             "device": str(device),
@@ -361,18 +371,15 @@ def main(argv: list[str] | None = None) -> int:
     destination = Path(args.output).expanduser().resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(
-        json.dumps(
-            {
-                "output": str(destination),
-                "rgb_fps": results["rgb_only"]["wall"]["fps_from_mean"],
-                "feature_fps": results["rgb_feature"]["wall"]["fps_from_mean"],
-                "psnr_db": results["rgb_only"]["quality"]["mean_psnr_db"],
-                "rgb_parity": results["rgb_feature"]["rgb_parity_vs_rgb_only"],
-            },
-            indent=2,
-        )
-    )
+    summary = {
+        "output": str(destination),
+        "rgb_fps": results["rgb_only"]["wall"]["fps_from_mean"],
+        "psnr_db": results["rgb_only"]["quality"]["mean_psnr_db"],
+    }
+    if "rgb_feature" in results:
+        summary["feature_fps"] = results["rgb_feature"]["wall"]["fps_from_mean"]
+        summary["rgb_parity"] = results["rgb_feature"]["rgb_parity_vs_rgb_only"]
+    print(json.dumps(summary, indent=2))
     return 0
 
 

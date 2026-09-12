@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -19,7 +20,32 @@ def tile_ext():
     default_source = Path(__file__).parents[1] / "mip360" / "cuda" / "np_tile_kernels.cu"
     source = Path(os.environ.get("MLPSP_CUDA_TEST_SOURCE", default_source))
     extension_name = os.environ.get("MLPSP_CUDA_TEST_EXT_NAME", "np_tile_kernels_cuda_tests")
-    return load(name=extension_name, sources=[str(source)], verbose=False)
+    extra_cuda_cflags = []
+    max_registers = os.environ.get("MLPSP_NVCC_MAXRREGCOUNT", "").strip()
+    if max_registers:
+        extra_cuda_cflags.append(f"-maxrregcount={max_registers}")
+    tilecenter_threads = os.environ.get("MLPSP_TILECENTER_BLOCK_THREADS", "").strip()
+    if tilecenter_threads:
+        extra_cuda_cflags.append(f"-DMLPSP_TILECENTER_BLOCK_THREADS={tilecenter_threads}")
+    recompute_geometry = os.environ.get(
+        "MLPSP_BACKWARD_RECOMPUTE_GEOMETRY", ""
+    ).strip()
+    if recompute_geometry:
+        extra_cuda_cflags.append(
+            f"-DMLPSP_BACKWARD_RECOMPUTE_GEOMETRY={recompute_geometry}"
+        )
+    max_hits = os.environ.get("MLPSP_TILECENTER_MAX_HITS", "").strip()
+    if max_hits:
+        extra_cuda_cflags.append(f"-DMLPSP_TILECENTER_MAX_HITS={max_hits}")
+    min_blocks = os.environ.get("MLPSP_BACKWARD_MIN_BLOCKS_PER_SM", "").strip()
+    if min_blocks:
+        extra_cuda_cflags.append(f"-DMLPSP_BACKWARD_MIN_BLOCKS_PER_SM={min_blocks}")
+    return load(
+        name=extension_name,
+        sources=[str(source)],
+        verbose=False,
+        extra_cuda_cflags=extra_cuda_cflags,
+    )
 
 
 def test_public_scene_defaults_match_release_architecture():
@@ -192,6 +218,108 @@ def _invoke(tile_ext, name: str, data):
             *base, data["feat_attr"], data["grad_feat"], 1.0, 1.0, *dims
         )
     raise AssertionError(f"unknown test entry point: {name}")
+
+
+def test_reduced_thread_tilecenter_build_rejects_tile16(tile_ext):
+    configured_threads = os.environ.get("MLPSP_TILECENTER_BLOCK_THREADS", "").strip()
+    if configured_threads not in {"64", "128"}:
+        pytest.skip("only applies to reduced-thread builds")
+
+    data = _renderer_inputs(1)
+    with pytest.raises(RuntimeError, match="MLPSP_TILECENTER_BLOCK_THREADS"):
+        tile_ext.render_tiles_forward_tilecenter(
+            *_base_args(data), 1, 1, 16, 16, 1.0e-3
+        )
+
+
+def test_tilecenter_backward_matches_reference(tile_ext):
+    reference_path = os.environ.get("MLPSP_CUDA_REFERENCE_SO", "").strip()
+    if not reference_path:
+        pytest.skip("set MLPSP_CUDA_REFERENCE_SO for cross-build numerical comparison")
+    reference_name = os.environ.get(
+        "MLPSP_CUDA_REFERENCE_NAME", "np_tile_kernels_cuda_tests"
+    )
+    spec = importlib.util.spec_from_file_location(reference_name, reference_path)
+    assert spec is not None and spec.loader is not None
+    reference = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reference)
+
+    torch.manual_seed(20260912)
+    data = _renderer_inputs(12)
+    data["positions"][:, 0] = torch.linspace(-0.08, 0.08, 12, device="cuda")
+    data["positions"][:, 1] = torch.linspace(0.05, -0.05, 12, device="cuda")
+    data["log_scales"].fill_(-0.5)
+    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        data[name].normal_(mean=0.0, std=0.1)
+
+    for entry_point in (
+        "render_tiles_forward_tilecenter",
+        "render_tiles_forward_tilecenter_with_feat",
+        "render_tiles_backward_tilecenter_full",
+        "render_tiles_backward_featattr_tilecenter",
+    ):
+        expected = _invoke(reference, entry_point, data)
+        actual = _invoke(tile_ext, entry_point, data)
+        if isinstance(actual, torch.Tensor):
+            torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
+            continue
+        for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+            torch.testing.assert_close(actual_tensor, expected_tensor, atol=2e-5, rtol=2e-5)
+
+    # Exercise a full tile whose pixels hit different primitive subsequences.
+    # This catches reduced-thread block specializations on divergent hit lists.
+    data = _renderer_inputs(24)
+    axis = torch.linspace(-0.45, 0.45, 8, device="cuda")
+    grid_y, grid_x = torch.meshgrid(axis, axis, indexing="ij")
+    data["rays_o"] = torch.stack(
+        (grid_x.reshape(-1), grid_y.reshape(-1), torch.zeros(64, device="cuda")), dim=-1
+    )
+    data["rays_d"] = torch.tensor([0.0, 0.0, 1.0], device="cuda").repeat(64, 1)
+    data["positions"][:, 0] = torch.linspace(-0.35, 0.35, 24, device="cuda")
+    data["positions"][:, 1] = torch.linspace(0.3, -0.3, 24, device="cuda")
+    data["log_scales"].fill_(-1.8)
+    data["grad_rgb"] = torch.randn((64, 3), device="cuda")
+    data["grad_t"] = torch.zeros(64, device="cuda")
+    data["grad_feat"] = torch.randn((64, 2), device="cuda")
+    data["feat_attr"].normal_(mean=0.0, std=0.1)
+    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        data[name].normal_(mean=0.0, std=0.1)
+    dimensions = (8, 8, 8, 8, 1.0e-3)
+    expected = reference.render_tiles_backward_tilecenter_full(
+        *_base_args(data), data["grad_rgb"], data["grad_t"], *dimensions
+    )
+    actual = tile_ext.render_tiles_backward_tilecenter_full(
+        *_base_args(data), data["grad_rgb"], data["grad_t"], *dimensions
+    )
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=5e-4, rtol=5e-4)
+
+    expected = reference.render_tiles_forward_tilecenter_with_feat(
+        *_base_args(data), data["feat_attr"], 1.0, 1.0, *dimensions
+    )
+    actual = tile_ext.render_tiles_forward_tilecenter_with_feat(
+        *_base_args(data), data["feat_attr"], 1.0, 1.0, *dimensions
+    )
+    for actual_tensor, expected_tensor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_tensor, expected_tensor, atol=5e-4, rtol=5e-4)
+
+    expected = reference.render_tiles_backward_featattr_tilecenter(
+        *_base_args(data), data["feat_attr"], data["grad_feat"], 1.0, 1.0, *dimensions
+    )
+    actual = tile_ext.render_tiles_backward_featattr_tilecenter(
+        *_base_args(data), data["feat_attr"], data["grad_feat"], 1.0, 1.0, *dimensions
+    )
+    torch.testing.assert_close(actual, expected, atol=5e-4, rtol=5e-4)
+
+
+def test_tilecenter_reduced_hit_buffer_reports_overflow(tile_ext):
+    if os.environ.get("MLPSP_TILECENTER_MAX_HITS", "").strip() != "128":
+        pytest.skip("only applies to the optimized 128-hit build")
+
+    data = _renderer_inputs(129)
+    data["b3"][:, 3] = -10.0
+    with pytest.raises(RuntimeError, match="backward hit capacity 128"):
+        _invoke(tile_ext, "render_tiles_backward_tilecenter_full", data)
 
 
 def test_warp_aggregated_atomic_handles_sparse_peer_masks(tile_ext):

@@ -42,6 +42,7 @@
     "feature_gating_beta": 1.5,
     "feature_gating_temp": 2.0,
     "feature_decoder_hidden_dim": 128,
+    "preload_features": true,
     "lr": 0.001,
     "log_scale_lr": 0.01,
     "lambda_dssim": 0.1,

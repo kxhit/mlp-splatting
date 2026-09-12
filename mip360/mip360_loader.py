@@ -308,7 +308,9 @@ class mip360Dataset(Dataset):
         else:
             payload = torch.load(feat_path, map_location="cpu")
         selected = select_feature_payload(payload, source=feat_path)
-        feat = torch.as_tensor(selected).float()
+        feat = torch.as_tensor(selected)
+        if feat.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            feat = feat.float()
 
         layout = infer_feature_layout(
             feat.shape, (H_img, W_img), self.feature_type, feat_path

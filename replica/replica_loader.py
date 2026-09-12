@@ -247,8 +247,6 @@ class mip360Dataset(Dataset):
             else:
                 feature_dir = self.feature_dir
             self._feature_paths = self._build_feature_path_list(feature_dir)
-            if self.preload_features:
-                self.features = self._preload_features()
 
         # Save normalization parameters for later use
         self.scale = scale
@@ -333,6 +331,11 @@ class mip360Dataset(Dataset):
             self.features = self.features[select_ids]
         elif self._feature_paths is not None:
             self._feature_paths = [self._feature_paths[int(i)] for i in select_ids]
+            if self.preload_features:
+                # Load only the selected split.  Replica room0 holds out ten of
+                # eighty views, so preloading before this point wastes 1.6 GiB
+                # of host memory and startup I/O for FP16 LSeg maps.
+                self.features = self._preload_features()
 
         # Expose selected indices and their corresponding image paths for UI/inspection
         try:
@@ -414,7 +417,14 @@ class mip360Dataset(Dataset):
         else:
             payload = torch.load(feat_path, map_location="cpu")
         selected = select_feature_payload(payload, source=feat_path)
-        feat = torch.as_tensor(selected).float()
+        feat = torch.as_tensor(selected)
+        # LSeg exports are commonly stored as float16.  Preserve that storage
+        # dtype while the maps live on CPU: widening every lazy load to float32
+        # doubles cache pressure, mosaic-copy traffic, and PCIe traffic without
+        # adding information.  Arithmetic with the float32 prediction still
+        # promotes the feature loss to float32.
+        if feat.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            feat = feat.float()
 
         layout = infer_feature_layout(
             feat.shape, (H_img, W_img), self.feature_type, feat_path

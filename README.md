@@ -55,8 +55,10 @@ python scripts/check_install.py
 ```
 
 The extension in `mip360/cuda/np_tile_kernels.cu` compiles lazily on the first
-render. Set `TORCH_EXTENSIONS_DIR` to choose its build cache. Perceptual and
-semantic evaluation have a separate dependency set:
+render. The released 8×8 recipe automatically selects its one-thread-per-pixel
+specialization; no kernel-tuning flags are required. Set `TORCH_EXTENSIONS_DIR`
+to choose the build cache. Perceptual and semantic evaluation have a separate
+dependency set:
 
 ```bash
 python -m pip install -r requirements-optional.txt
@@ -128,7 +130,10 @@ python train.py \
 
 The configuration records the complete `m=10` setup: 60,000 iterations, the
 Feature-3DGS split, optimizer values, tile traversal, view mosaics, and feature
-settings. Each run writes its resolved configuration beside the checkpoints.
+settings. The LSeg maps stay in their source FP16 format and are preloaded after
+the train split is selected (about 12 GiB for room0), avoiding storage I/O in
+the optimization loop. Each run writes its resolved configuration beside the
+checkpoints.
 
 Evaluate a newly trained checkpoint with the same recipe:
 
