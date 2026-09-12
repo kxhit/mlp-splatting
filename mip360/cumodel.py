@@ -491,16 +491,29 @@ class _TileRenderWithFeatAutogradFn(torch.autograd.Function):
                 if bg.numel() == 1:
                     bg = bg.repeat(3)
                 grad_T_end = (grad_out_rgb * bg.view(1, 3)).sum(dim=-1)
-            (grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
-             grad_positions, grad_log_scales, grad_quats) = ext.render_tiles_backward_tilecenter_full(
-                rays_o, rays_d, positions, log_scales, quats,
-                culled_prim_indices, tile_offsets,
-                freq, att, W1, b1, W2, b2, W3, b3,
-                grad_out_rgb, grad_T_end,
-                ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
-            )
+            if grad_out_feat is not None and W1.dtype == torch.float32:
+                grad_out_feat = grad_out_feat.contiguous()
+                (grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
+                 grad_positions, grad_log_scales, grad_quats,
+                 grad_feat_attr) = ext.render_tiles_backward_tilecenter_full_with_feat(
+                    rays_o, rays_d, positions, log_scales, quats,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    feat_attr, grad_out_rgb, grad_T_end, grad_out_feat,
+                    float(ctx.gating_beta), float(ctx.gating_temp),
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
+            else:
+                (grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
+                 grad_positions, grad_log_scales, grad_quats) = ext.render_tiles_backward_tilecenter_full(
+                    rays_o, rays_d, positions, log_scales, quats,
+                    culled_prim_indices, tile_offsets,
+                    freq, att, W1, b1, W2, b2, W3, b3,
+                    grad_out_rgb, grad_T_end,
+                    ctx.Wimg, ctx.Himg, ctx.TW, ctx.TH, ctx.threshold
+                )
 
-        if grad_out_feat is not None:
+        if grad_out_feat is not None and grad_feat_attr is None:
             grad_out_feat = grad_out_feat.contiguous()
             grad_feat_attr = ext.render_tiles_backward_featattr_tilecenter(
                 rays_o, rays_d, positions, log_scales, quats,

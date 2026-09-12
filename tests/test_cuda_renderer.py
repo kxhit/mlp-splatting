@@ -217,6 +217,17 @@ def _invoke(tile_ext, name: str, data):
         return tile_ext.render_tiles_backward_featattr_tilecenter(
             *base, data["feat_attr"], data["grad_feat"], 1.0, 1.0, *dims
         )
+    if name == "render_tiles_backward_tilecenter_full_with_feat":
+        return tile_ext.render_tiles_backward_tilecenter_full_with_feat(
+            *base,
+            data["feat_attr"],
+            data["grad_rgb"],
+            data["grad_t"],
+            data["grad_feat"],
+            1.0,
+            1.0,
+            *dims,
+        )
     raise AssertionError(f"unknown test entry point: {name}")
 
 
@@ -312,6 +323,31 @@ def test_tilecenter_backward_matches_reference(tile_ext):
     torch.testing.assert_close(actual, expected, atol=5e-4, rtol=5e-4)
 
 
+@pytest.mark.parametrize("feature_slots", [4, 5])
+def test_fused_rgb_feature_backward_matches_separate_kernels(tile_ext, feature_slots):
+    torch.manual_seed(20260912 + feature_slots)
+    data = _renderer_inputs(16)
+    data["positions"][:, 0] = torch.linspace(-0.12, 0.12, 16, device="cuda")
+    data["positions"][:, 1] = torch.linspace(0.08, -0.08, 16, device="cuda")
+    data["log_scales"].fill_(-0.7)
+    data["feat_attr"] = torch.randn((16, feature_slots, 7), device="cuda")
+    data["grad_feat"] = torch.randn((1, 7), device="cuda")
+    data["grad_rgb"] = torch.randn((1, 3), device="cuda")
+    for name in ("W1", "b1", "W2", "b2", "W3", "b3"):
+        data[name].normal_(mean=0.0, std=0.1)
+
+    rgb_grads = _invoke(tile_ext, "render_tiles_backward_tilecenter_full", data)
+    feature_grad = _invoke(tile_ext, "render_tiles_backward_featattr_tilecenter", data)
+    fused_grads = _invoke(
+        tile_ext, "render_tiles_backward_tilecenter_full_with_feat", data
+    )
+
+    assert len(fused_grads) == len(rgb_grads) + 1
+    for fused, separate in zip(fused_grads[:-1], rgb_grads, strict=True):
+        torch.testing.assert_close(fused, separate, atol=2e-5, rtol=2e-5)
+    torch.testing.assert_close(fused_grads[-1], feature_grad, atol=2e-5, rtol=2e-5)
+
+
 def test_tilecenter_reduced_hit_buffer_reports_overflow(tile_ext):
     if os.environ.get("MLPSP_TILECENTER_MAX_HITS", "").strip() != "128":
         pytest.skip("only applies to the optimized 128-hit build")
@@ -351,6 +387,7 @@ def test_warp_aggregated_atomic_handles_sparse_peer_masks(tile_ext):
         ("render_tiles_forward_tilecenter_with_feat", 768, "tile candidate capacity 768 exceeded"),
         ("render_tiles_backward_tilecenter_full", 768, "tile candidate capacity 768 exceeded"),
         ("render_tiles_backward_featattr_tilecenter", 768, "tile candidate capacity 768 exceeded"),
+        ("render_tiles_backward_tilecenter_full_with_feat", 768, "tile candidate capacity 768 exceeded"),
     ],
 )
 def test_rgb_and_feature_entry_points_fail_explicitly_on_capacity_overflow(

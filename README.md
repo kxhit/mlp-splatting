@@ -132,8 +132,9 @@ The configuration records the complete `m=10` setup: 60,000 iterations, the
 Feature-3DGS split, optimizer values, tile traversal, view mosaics, and feature
 settings. The LSeg maps stay in their source FP16 format and are preloaded after
 the train split is selected (about 12 GiB for room0), avoiding storage I/O in
-the optimization loop. Each run writes its resolved configuration beside the
-checkpoints.
+the optimization loop. Joint RGB and feature supervision shares one CUDA
+backward traversal, rather than recomputing the same ray–primitive hits twice.
+Each run writes its resolved configuration beside the checkpoints.
 
 Evaluate a newly trained checkpoint with the same recipe:
 

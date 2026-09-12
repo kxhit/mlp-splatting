@@ -2911,7 +2911,7 @@ __global__ void render_tiles_backward_emit_tilecenter(
 }
 
 // Backward (tilecenter full): compute MLP grads in-kernel (option A)
-template <typename WType>
+template <typename WType, bool WITH_FEATURE>
 // EN: Full tile-center backward kernel computing MLP and geometry gradients in one pass.
 // The only effective backward kernel for tilecenter mode.
 __global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, MLPSP_BACKWARD_MIN_BLOCKS_PER_SM) void render_tiles_backward_tilecenter_full(
@@ -2933,6 +2933,12 @@ __global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, MLPSP_BACKWARD_MIN_
     const float thr,
     const float* __restrict__ grad_out_rgb,
     const float* __restrict__ grad_T_end,
+    const float* __restrict__ grad_out_feat,
+    const int feat_slots,
+    const int Cfeat,
+    const float gating_beta,
+    const float gating_temp,
+    float* __restrict__ grad_feat_attr,
     float* __restrict__ grad_W1, float* __restrict__ grad_b1,
     float* __restrict__ grad_W2, float* __restrict__ grad_b2,
     float* __restrict__ grad_W3, float* __restrict__ grad_b3,
@@ -3251,6 +3257,56 @@ __global__ __launch_bounds__(MLPSP_TILECENTER_BLOCK_THREADS, MLPSP_BACKWARD_MIN_
     const float decay = __expf(-0.5f * r2);
     const float alpha_i = 1.f - __expf(-sigma_raw * decay);
     const float dotg = dot3(grad_r, grad_g, grad_b, R, G, Bc);
+
+    if constexpr (WITH_FEATURE) {
+      const float w = trans_i * alpha_i;
+      const float* gfeat_pix = grad_out_feat + (size_t)pix * Cfeat;
+      if (feat_slots <= 1) {
+        float* gfeat_prim = grad_feat_attr + (size_t)p * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+        }
+      } else if (feat_slots == 5) {
+        float g0, g1, g2, g3;
+        semantic_tetra_gates(
+            qlx, qly, qlz, lgx, lgy, lgz,
+            gating_beta, gating_temp, g0, g1, g2, g3);
+        float* gbase = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+        float* gd0 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+        float* gd1 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+        float* gd2 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+        float* gd3 = grad_feat_attr + ((size_t)p * feat_slots + 4) * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          const float gc = w * gfeat_pix[c];
+          atomic_add_warp_agg(&gbase[c], gc);
+          atomic_add_warp_agg(&gd0[c], gc * g0);
+          atomic_add_warp_agg(&gd1[c], gc * g1);
+          atomic_add_warp_agg(&gd2[c], gc * g2);
+          atomic_add_warp_agg(&gd3[c], gc * g3);
+        }
+      } else if (feat_slots == 4) {
+        float g0, g1, g2, g3;
+        semantic_tetra_gates(
+            qlx, qly, qlz, lgx, lgy, lgz,
+            gating_beta, gating_temp, g0, g1, g2, g3);
+        float* gs0 = grad_feat_attr + ((size_t)p * feat_slots + 0) * Cfeat;
+        float* gs1 = grad_feat_attr + ((size_t)p * feat_slots + 1) * Cfeat;
+        float* gs2 = grad_feat_attr + ((size_t)p * feat_slots + 2) * Cfeat;
+        float* gs3 = grad_feat_attr + ((size_t)p * feat_slots + 3) * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          const float gc = w * gfeat_pix[c];
+          atomic_add_warp_agg(&gs0[c], gc * g0);
+          atomic_add_warp_agg(&gs1[c], gc * g1);
+          atomic_add_warp_agg(&gs2[c], gc * g2);
+          atomic_add_warp_agg(&gs3[c], gc * g3);
+        }
+      } else {
+        float* gfeat_prim = grad_feat_attr + (size_t)p * feat_slots * Cfeat;
+        for (int c = 0; c < Cfeat; ++c) {
+          atomic_add_warp_agg(&gfeat_prim[c], w * gfeat_pix[c]);
+        }
+      }
+    }
 
     const float grad_alpha = trans_i * (dotg - gT_next);
     const float gT_i = gT_next * (1.f - alpha_i) + dotg * alpha_i;
@@ -6632,7 +6688,7 @@ render_tiles_backward_tilecenter_full_wrapper(
     dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
     dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
     if (W1.scalar_type() == at::kFloat) {
-      render_tiles_backward_tilecenter_full<float><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+      render_tiles_backward_tilecenter_full<float, false><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
         rays_d.data_ptr<float>(),
         positions.data_ptr<float>(),
@@ -6651,6 +6707,7 @@ render_tiles_backward_tilecenter_full_wrapper(
         (float)threshold,
         grad_out_rgb.data_ptr<float>(),
         grad_T_end.data_ptr<float>(),
+        nullptr, 0, 0, 0.f, 0.f, nullptr,
         grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
         grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
@@ -6659,7 +6716,7 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_quats.data_ptr<float>(),
         hit_overflow_ptr);
     } else if (W1.scalar_type() == at::kHalf) {
-      render_tiles_backward_tilecenter_full<__half><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+      render_tiles_backward_tilecenter_full<__half, false><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
         rays_d.data_ptr<float>(),
         positions.data_ptr<float>(),
@@ -6678,6 +6735,7 @@ render_tiles_backward_tilecenter_full_wrapper(
         (float)threshold,
         grad_out_rgb.data_ptr<float>(),
         grad_T_end.data_ptr<float>(),
+        nullptr, 0, 0, 0.f, 0.f, nullptr,
         grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
         grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
@@ -6686,7 +6744,7 @@ render_tiles_backward_tilecenter_full_wrapper(
         grad_quats.data_ptr<float>(),
         hit_overflow_ptr);
     } else {
-      render_tiles_backward_tilecenter_full<__nv_bfloat16><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+      render_tiles_backward_tilecenter_full<__nv_bfloat16, false><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
         rays_o.data_ptr<float>(),
         rays_d.data_ptr<float>(),
         positions.data_ptr<float>(),
@@ -6705,6 +6763,7 @@ render_tiles_backward_tilecenter_full_wrapper(
         (float)threshold,
         grad_out_rgb.data_ptr<float>(),
         grad_T_end.data_ptr<float>(),
+        nullptr, 0, 0, 0.f, 0.f, nullptr,
         grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
         grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
         grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
@@ -6718,6 +6777,123 @@ render_tiles_backward_tilecenter_full_wrapper(
     check_tilecenter_backward_hit_overflow(hit_overflow, "render_tiles_backward_tilecenter_full");
 #endif
     return {grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3, grad_positions, grad_log_scales, grad_quats};
+}
+
+// Joint RGB + feature-attribute backward.  The feature gradient is accumulated
+// while the RGB kernel already has each hit's transmittance, alpha and local
+// coordinates live, avoiding a second sort/intersection/MLP traversal.
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+render_tiles_backward_tilecenter_full_with_feat_wrapper(
+    torch::Tensor rays_o,
+    torch::Tensor rays_d,
+    torch::Tensor positions,
+    torch::Tensor log_scales,
+    torch::Tensor quats,
+    torch::Tensor culled_prim_indices,
+    torch::Tensor tile_offsets,
+    torch::Tensor freq_bands,
+    torch::Tensor attenuation,
+    torch::Tensor W1, torch::Tensor b1,
+    torch::Tensor W2, torch::Tensor b2,
+    torch::Tensor W3, torch::Tensor b3,
+    torch::Tensor feat_attr,
+    torch::Tensor grad_out_rgb,
+    torch::Tensor grad_T_end,
+    torch::Tensor grad_out_feat,
+    double gating_beta,
+    double gating_temp,
+    int64_t Wimg, int64_t Himg,
+    int64_t TW, int64_t TH,
+    double threshold)
+{
+    TORCH_CHECK(((int)TW * (int)TH) > 0 && ((int)TW * (int)TH) <= MLPSP_TILECENTER_BLOCK_THREADS,
+                "Tile-center fused backward requires 0 < TW*TH <= MLPSP_TILECENTER_BLOCK_THREADS");
+    TORCH_CHECK(rays_o.is_cuda() && rays_o.dtype()==at::kFloat && rays_o.dim()==2 && rays_o.size(1)==3);
+    TORCH_CHECK(rays_d.is_cuda() && rays_d.dtype()==at::kFloat && rays_d.dim()==2 && rays_d.size(1)==3);
+    TORCH_CHECK(positions.is_cuda() && positions.dtype()==at::kFloat && positions.dim()==2 && positions.size(1)==3);
+    TORCH_CHECK(log_scales.is_cuda() && log_scales.dtype()==at::kFloat && log_scales.dim()==2 && log_scales.size(1)==3);
+    TORCH_CHECK(quats.is_cuda() && quats.dtype()==at::kFloat && quats.dim()==2 && quats.size(1)==4);
+    TORCH_CHECK(culled_prim_indices.is_cuda() && culled_prim_indices.dtype()==at::kInt && culled_prim_indices.dim()==1);
+    TORCH_CHECK(tile_offsets.is_cuda() && tile_offsets.dtype()==at::kInt && tile_offsets.dim()==1);
+    TORCH_CHECK(freq_bands.is_cuda() && freq_bands.dtype()==at::kFloat && freq_bands.dim()==1);
+    TORCH_CHECK(attenuation.is_cuda() && attenuation.dtype()==at::kFloat && attenuation.dim()==1);
+    TORCH_CHECK(W1.is_cuda() && W1.dtype()==at::kFloat && b1.dtype()==at::kFloat &&
+                W2.dtype()==at::kFloat && b2.dtype()==at::kFloat && W3.dtype()==at::kFloat && b3.dtype()==at::kFloat,
+                "Fused RGB+feature backward requires float32 MLP tensors");
+    TORCH_CHECK(feat_attr.is_cuda() && feat_attr.dtype()==at::kFloat && (feat_attr.dim()==2 || feat_attr.dim()==3));
+    TORCH_CHECK(grad_out_rgb.is_cuda() && grad_out_rgb.dtype()==at::kFloat && grad_out_rgb.dim()==2 && grad_out_rgb.size(1)==3);
+    TORCH_CHECK(grad_T_end.is_cuda() && grad_T_end.dtype()==at::kFloat && grad_T_end.dim()==1);
+    TORCH_CHECK(grad_out_feat.is_cuda() && grad_out_feat.dtype()==at::kFloat && grad_out_feat.dim()==2);
+
+    const int64_t B = rays_o.size(0);
+    const int64_t N = positions.size(0);
+    const int64_t Hh = W2.size(1);
+    const int64_t IN = W1.size(2);
+    const int64_t F = freq_bands.size(0);
+    TORCH_CHECK(B == Wimg * Himg, "B must equal W*H for tile renderer");
+    TORCH_CHECK(grad_out_rgb.size(0) == B && grad_T_end.numel() == B && grad_out_feat.size(0) == B,
+                "Output gradients must match the full-frame ray count");
+    TORCH_CHECK(IN == 6 * F * 2, "Encoded dim must be 6*F*2");
+    TORCH_CHECK(feat_attr.size(0) == N, "feat_attr first dimension must match primitive count");
+    int64_t feat_slots = 1;
+    int64_t Cfeat = 0;
+    if (feat_attr.dim() == 2) {
+      Cfeat = feat_attr.size(1);
+    } else {
+      feat_slots = feat_attr.size(1);
+      Cfeat = feat_attr.size(2);
+      TORCH_CHECK(feat_slots == 4 || feat_slots == 5, "3D feat_attr expects slots in {4,5}");
+    }
+    TORCH_CHECK(Cfeat > 0 && Cfeat <= 512 && grad_out_feat.size(1) == Cfeat,
+                "grad_out_feat feature dimension must match feat_attr and be in [1,512]");
+    validate_tile_candidate_capacity(
+        culled_prim_indices, tile_offsets, Wimg, Himg, TW, TH, MLPSP_MAX_TILE_PRIMS,
+        "render_tiles_backward_tilecenter_full_with_feat");
+
+    auto opts_f = rays_o.options().dtype(at::kFloat);
+    auto grad_W1 = torch::zeros(W1.sizes(), opts_f);
+    auto grad_b1 = torch::zeros(b1.sizes(), opts_f);
+    auto grad_W2 = torch::zeros(W2.sizes(), opts_f);
+    auto grad_b2 = torch::zeros(b2.sizes(), opts_f);
+    auto grad_W3 = torch::zeros(W3.sizes(), opts_f);
+    auto grad_b3 = torch::zeros(b3.sizes(), opts_f);
+    auto grad_positions = torch::zeros({N, 3}, opts_f);
+    auto grad_log_scales = torch::zeros({N, 3}, opts_f);
+    auto grad_quats = torch::zeros({N, 4}, opts_f);
+    auto grad_feat_attr = torch::zeros(feat_attr.sizes(), opts_f);
+#if MLPSP_TILECENTER_MAX_HITS < 512
+    auto hit_overflow = torch::zeros({1}, tile_offsets.options());
+    int32_t* hit_overflow_ptr = hit_overflow.data_ptr<int32_t>();
+#else
+    int32_t* hit_overflow_ptr = nullptr;
+#endif
+
+    dim3 block(MLPSP_TILECENTER_BLOCK_THREADS, 1, 1);
+    dim3 grid((unsigned)((Wimg + TW - 1)/TW), (unsigned)((Himg + TH - 1)/TH), 1);
+    render_tiles_backward_tilecenter_full<float, true><<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+        rays_o.data_ptr<float>(), rays_d.data_ptr<float>(),
+        positions.data_ptr<float>(), log_scales.data_ptr<float>(), quats.data_ptr<float>(),
+        culled_prim_indices.data_ptr<int32_t>(), tile_offsets.data_ptr<int32_t>(),
+        freq_bands.data_ptr<float>(), attenuation.data_ptr<float>(), (int)F,
+        W1.data_ptr<float>(), b1.data_ptr<float>(), W2.data_ptr<float>(), b2.data_ptr<float>(),
+        W3.data_ptr<float>(), b3.data_ptr<float>(),
+        (int)N, (int)Hh, (int)IN,
+        (int)Wimg, (int)Himg, (int)TW, (int)TH, (float)threshold,
+        grad_out_rgb.data_ptr<float>(), grad_T_end.data_ptr<float>(),
+        grad_out_feat.data_ptr<float>(), (int)feat_slots, (int)Cfeat,
+        (float)gating_beta, (float)gating_temp, grad_feat_attr.data_ptr<float>(),
+        grad_W1.data_ptr<float>(), grad_b1.data_ptr<float>(),
+        grad_W2.data_ptr<float>(), grad_b2.data_ptr<float>(),
+        grad_W3.data_ptr<float>(), grad_b3.data_ptr<float>(),
+        grad_positions.data_ptr<float>(), grad_log_scales.data_ptr<float>(),
+        grad_quats.data_ptr<float>(), hit_overflow_ptr);
+    AT_CUDA_CHECK(cudaGetLastError());
+#if MLPSP_TILECENTER_MAX_HITS < 512
+    check_tilecenter_backward_hit_overflow(hit_overflow, "render_tiles_backward_tilecenter_full_with_feat");
+#endif
+    return {grad_W1, grad_b1, grad_W2, grad_b2, grad_W3, grad_b3,
+            grad_positions, grad_log_scales, grad_quats, grad_feat_attr};
 }
 
 std::vector<torch::Tensor>
@@ -6840,6 +7016,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("render_tiles_backward_featattr_per_pixel", &render_tiles_backward_featattr_per_pixel_wrapper, "Tile splatting backward feat_attr-only (per-pixel)");
   m.def("render_tiles_backward_featattr_tilecenter", &render_tiles_backward_featattr_tilecenter_wrapper, "Tile splatting backward feat_attr-only (tilecenter)");
   m.def("render_tiles_backward_tilecenter_full", &render_tiles_backward_tilecenter_full_wrapper, "Tile splatting backward full (tilecenter, MLP grads in CUDA)");
+  m.def("render_tiles_backward_tilecenter_full_with_feat", &render_tiles_backward_tilecenter_full_with_feat_wrapper, "Fused RGB and feature-attribute tile-center backward");
   m.def("render_tiles_backward_tilecenter_traversal", &render_tiles_backward_tilecenter_traversal_wrapper, "Tile splatting backward traversal-only (tilecenter profiling)");
   m.def("render_tiles_backward_tilecenter_backprop_noatomic", &render_tiles_backward_tilecenter_backprop_noatomic_wrapper, "Tile splatting backward backprop-only (tilecenter profiling, no atomics)");
   m.def("_test_atomic_add_warp_agg", &test_atomic_add_warp_agg_wrapper, "Internal sparse-peer warp atomic test hook");
